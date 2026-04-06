@@ -1336,7 +1336,13 @@ with tab_risk:
                     "category", "risk_description", "probability",
                     "impact", "score", "owner", "status", "severity",
                 ]].copy()
-                styled_risk = risk_display.style.applymap(_color_severity, subset=["severity"])
+                if risk_display is not None and not risk_display.empty:
+    if "severity" in risk_display.columns:
+        styled_risk = risk_display.style.applymap(_color_severity, subset=["severity"])
+    else:
+        styled_risk = risk_display
+else:
+    st.warning("No risk data available")
                 st.dataframe(styled_risk, use_container_width=True, hide_index=True)
             else:
                 st.info("No risks detected for this project.")
