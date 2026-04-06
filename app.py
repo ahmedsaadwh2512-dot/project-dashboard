@@ -12,7 +12,7 @@ import streamlit as st
 # PAGE CONFIG
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="Primavera XER Intelligence Dashboard",
+    page_title="Project Controls Dashboard | XER Analytics",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -1334,20 +1334,18 @@ with tab_risk:
                     if val == "Medium":   return "background-color:#fefce8; color:#a16207; font-weight:800"
                     return "background-color:#ecfdf5; color:#10b981; font-weight:800"
 
-risk_display = risk_df[[
-    "category", "risk_description", "probability",
-    "impact", "score", "owner", "status", "severity",
-]].copy()
+                risk_display = risk_df[[
+                    "category", "risk_description", "probability",
+                    "impact", "score", "owner", "status", "severity",
+                ]].copy()
 
-if "severity" in risk_display.columns and not risk_display.empty:
-    styled_risk = risk_display.style.map(
-        _color_severity,
-        subset=["severity"],
-    )
-else:
-    styled_risk = risk_display
-
-st.dataframe(styled_risk, use_container_width=True, hide_index=True)
+                if "severity" in risk_display.columns and not risk_display.empty:
+                    styled_risk = risk_display.style.map(
+                        _color_severity,
+                        subset=["severity"],
+                    )
+                else:
+                    styled_risk = risk_display
 
                 st.dataframe(styled_risk, use_container_width=True, hide_index=True)
             else:
