@@ -12,12 +12,13 @@ GA_ID = "G-T364GPZF30"
 
 components.html(f"""
 <!-- Google tag (gtag.js) -->
-<script async src="https://www.googletagmanager.com/gtag/js?id={GA_ID}"></script>
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-T364GPZF30"></script>
 <script>
-window.dataLayer = window.dataLayer || [];
-function gtag(){{dataLayer.push(arguments);}}
-gtag('js', new Date());
-gtag('config', '{GA_ID}');
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-T364GPZF30');
 </script>
 """, height=0)
 
