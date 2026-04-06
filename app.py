@@ -12,15 +12,12 @@ import streamlit as st
 # PAGE CONFIG
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="Project Controls Dashboard | XER Analytics",
+    page_title="Primavera XER Intelligence Dashboard",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
 )
-st.sidebar.image("profile.jpg", width=130)
-st.sidebar.markdown("### 👷 Project Controls Dashboard")
-st.sidebar.caption("by Ahmed Saad")
-st.info("Upload a Primavera XER file to analyze project performance.")
+
 # ─────────────────────────────────────────────
 # THEME
 # ─────────────────────────────────────────────
@@ -1336,13 +1333,10 @@ with tab_risk:
                     "category", "risk_description", "probability",
                     "impact", "score", "owner", "status", "severity",
                 ]].copy()
-               if risk_display is not None and not risk_display.empty:
-    if "severity" in risk_display.columns:
-        styled_risk = risk_display.style.applymap(_color_severity, subset=["severity"])
-    else:
-        styled_risk = risk_display
-else:
-    st.warning("No risk data available")
+                if "severity" in risk_display.columns and not risk_display.empty:
+                    styled_risk = risk_display.style.applymap(_color_severity, subset=["severity"])
+                else:
+                    styled_risk = risk_display
                 st.dataframe(styled_risk, use_container_width=True, hide_index=True)
             else:
                 st.info("No risks detected for this project.")
