@@ -12,7 +12,7 @@ import streamlit as st
 # PAGE CONFIG
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="Primavera XER Intelligence Dashboard",
+    page_title="Project Controls Dashboard | XER Analytics",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -20,6 +20,7 @@ st.set_page_config(
 st.sidebar.image("profile.jpg", width=130)
 st.sidebar.markdown("### 👷 Project Controls Dashboard")
 st.sidebar.caption("by Ahmed Saad")
+st.info("Upload a Primavera XER file to analyze project performance.")
 # ─────────────────────────────────────────────
 # THEME
 # ─────────────────────────────────────────────
