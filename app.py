@@ -1336,7 +1336,7 @@ with tab_risk:
                     "category", "risk_description", "probability",
                     "impact", "score", "owner", "status", "severity",
                 ]].copy()
-                if risk_display is not None and not risk_display.empty:
+               if risk_display is not None and not risk_display.empty:
     if "severity" in risk_display.columns:
         styled_risk = risk_display.style.applymap(_color_severity, subset=["severity"])
     else:
