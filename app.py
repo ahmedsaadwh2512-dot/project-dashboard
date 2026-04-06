@@ -17,6 +17,11 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+st.sidebar.image("profile.jpg", width=130)
+st.sidebar.markdown("### 👷 Project Controls Dashboard")
+st.sidebar.caption("by Ahmed Saad")
+
+st.info("Upload a Primavera XER file to analyze project performance.")
 
 # ─────────────────────────────────────────────
 # THEME
