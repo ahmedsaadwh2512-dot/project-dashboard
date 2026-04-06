@@ -1348,10 +1348,7 @@ else:
     styled_risk = risk_display
 
 st.dataframe(styled_risk, use_container_width=True, hide_index=True)
-                if "severity" in risk_display.columns and not risk_display.empty:
-                    styled_risk = risk_display.style.applymap(_color_severity, subset=["severity"])
-                else:
-                    styled_risk = risk_display
+
                 st.dataframe(styled_risk, use_container_width=True, hide_index=True)
             else:
                 st.info("No risks detected for this project.")
