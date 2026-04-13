@@ -7,18 +7,18 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components 
+import streamlit.components.v1 as components
+
 GA_ID = "G-T364GPZF30"
 
 components.html(f"""
 <!-- Google tag (gtag.js) -->
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-T364GPZF30"></script>
+<script async src="https://www.googletagmanager.com/gtag/js?id={GA_ID}"></script>
 <script>
   window.dataLayer = window.dataLayer || [];
-  function gtag(){dataLayer.push(arguments);}
+  function gtag(){{dataLayer.push(arguments);}}
   gtag('js', new Date());
-
-  gtag('config', 'G-T364GPZF30');
+  gtag('config', '{GA_ID}');
 </script>
 """, height=0)
 
@@ -31,12 +31,12 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
 st.sidebar.image("profile.jpg", width=130)
 st.sidebar.markdown("### 👷 Project Controls Dashboard")
 st.sidebar.caption("by Ahmed Saad")
 
 st.info("Upload a Primavera XER file to analyze project performance.")
-
 # ─────────────────────────────────────────────
 # THEME
 # ─────────────────────────────────────────────
