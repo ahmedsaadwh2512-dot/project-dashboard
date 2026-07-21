@@ -32,8 +32,8 @@ gtag('config', '{GA_ID}');
 </script>
 """, height=0)
 
-# ✅ FIX #2 — Company logo (place dogus_logo.jpeg next to app.py)
-st.sidebar.image("dogus_logo.jpeg", use_container_width=True)
+# ✅ FIX #2 — Dashboard brand logo (place pcd_logo.png next to app.py)
+st.sidebar.image("pcd_logo.png", use_container_width=True)
 st.sidebar.markdown("### 👷 Project Controls Dashboard")
 st.sidebar.caption("by Ahmed Saad")
 
@@ -456,13 +456,22 @@ def infer_area_mapping(tables, chosen_type: str | None):
     if chosen_type:
         area = merged[type_series.eq(chosen_type)].copy()
     else:
+        # ✅ PARCEL-FIX #14 — broader keyword auto-detect (this project uses
+        #    "WB-Permanent Work" / "WB-Part", not "Area")
         area = merged[type_series.str.lower().str.contains(
-            "area|parcel|zone", na=False, regex=True)].copy()
+            "area|parcel|zone|permanent|part|package", na=False, regex=True)].copy()
     if area.empty:
         return empty
 
-    area["parcel_id"]   = area["short_name"].replace({"": np.nan}).fillna(area["actv_code_name"])
-    area["parcel_name"] = area["actv_code_name"].replace({"": np.nan}).fillna(area["short_name"])
+    # ✅ PARCEL-FIX #14 — human-readable label: "CODE — Full Name"
+    short = area["short_name"].astype(str).str.strip().replace({"": np.nan})
+    full  = area["actv_code_name"].astype(str).str.strip().replace({"": np.nan})
+    area["parcel_name"] = full.fillna(short)
+    area["parcel_id"]   = np.where(
+        short.notna() & full.notna() & (short != full),
+        short.fillna("") + " — " + full.fillna(""),
+        area["parcel_name"],
+    )
 
     multi_count = int(area.duplicated(subset=["task_id"]).sum())
     area = (
@@ -489,11 +498,15 @@ def build_parcel_df(task_ev_df: pd.DataFrame, cutoff):
         forecast_finish=("forecast_finish_date", "max"),
         baseline_finish=("target_end_date",      "max"),
     )
+    # ✅ PARCEL-FIX #15 — PV is grouped on the SAME key as the aggregation
+    #    (parcel_id + parcel_name). The old id-only grouping merged PV from
+    #    every name sharing an id into each row, inflating Plan % (the
+    #    2,400% bars you saw).
     pv_list = []
-    for pid, grp in task_ev_df.groupby("parcel_id", dropna=False):
-        pv_list.append((pid, compute_group_pv(grp, cutoff)))
-    pv_df        = pd.DataFrame(pv_list, columns=["parcel_id", "pv"])
-    parcel_group = parcel_group.merge(pv_df, on="parcel_id", how="left")
+    for (pid, pname), grp in task_ev_df.groupby(["parcel_id", "parcel_name"], dropna=False):
+        pv_list.append((pid, pname, compute_group_pv(grp, cutoff)))
+    pv_df        = pd.DataFrame(pv_list, columns=["parcel_id", "parcel_name", "pv"])
+    parcel_group = parcel_group.merge(pv_df, on=["parcel_id", "parcel_name"], how="left")
     parcel_group["pv"]           = parcel_group["pv"].fillna(0.0)
     parcel_group["plan_pct"]     = np.where(parcel_group["bac"] > 0, parcel_group["pv"] / parcel_group["bac"] * 100, 0.0)
     parcel_group["actual_pct"]   = np.where(parcel_group["bac"] > 0, parcel_group["ev"] / parcel_group["bac"] * 100, 0.0)
@@ -613,10 +626,13 @@ HOURS_PER_DAY = st.sidebar.number_input(
 # ✅ PARCEL-FIX #7c — user-selectable activity-code type driving parcels
 code_type_options = list_activity_code_types(tables)
 default_idx = 0
-for i, t in enumerate(code_type_options):
-    if any(k in t.lower() for k in ("area", "parcel", "zone")):
-        default_idx = i + 1
+for keyword_pass in (("area", "parcel", "zone"), ("permanent",), ("part", "package")):
+    if default_idx:
         break
+    for i, t in enumerate(code_type_options):
+        if any(k in t.lower() for k in keyword_pass):
+            default_idx = i + 1
+            break
 PARCEL_CODE_TYPE = st.sidebar.selectbox(
     "Parcel source (activity code type)",
     ["(auto-detect)"] + code_type_options,
@@ -682,18 +698,16 @@ if not wbs_df.empty and "wbs_id" in model.columns:
     )
 
 # Parcel (chosen activity code → WBS fallback → UNASSIGNED)
+# ✅ PARCEL-FIX #14 — fallback now uses the FULL wbs_name ("CONSTRUCTION",
+#    "Contractual Milestones", …) instead of wbs_short_name, which in many
+#    programmes is just a sequence number ("1", "2", "4") and unreadable.
 parcel_map, multi_assigned = infer_area_mapping(tables, chosen_type)
 model = model.merge(parcel_map, on="task_id", how="left")
-model["parcel_id"] = (
-    model["parcel_id"]
-    .fillna(model.get("wbs_short_name", pd.Series(index=model.index, dtype=object)))
-    .fillna("UNASSIGNED")
-)
-model["parcel_name"] = (
-    model["parcel_name"]
-    .fillna(model.get("wbs_name", pd.Series(index=model.index, dtype=object)))
-    .fillna(model["parcel_id"])
-)
+wbs_name_fb = model.get("wbs_name", pd.Series(index=model.index, dtype=object))
+model["parcel_id"]   = model["parcel_id"].fillna(wbs_name_fb).fillna("UNASSIGNED")
+model["parcel_name"] = model["parcel_name"].fillna(wbs_name_fb).fillna(model["parcel_id"])
+model["parcel_id"]   = model["parcel_id"].astype(str)
+model["parcel_name"] = model["parcel_name"].astype(str)
 if multi_assigned > 0:
     st.sidebar.warning(
         f"{multi_assigned} task(s) carry multiple parcel codes — "
