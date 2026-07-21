@@ -9,9 +9,20 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 
-GA_ID = "G-T364GPZF30"
+# ─────────────────────────────────────────────
+# PAGE CONFIG
+# ✅ FIX #1 — set_page_config MUST be the first Streamlit command.
+#    (GA injection moved below it; previously it triggered a runtime error.)
+# ─────────────────────────────────────────────
+st.set_page_config(
+    page_title="Project Controls Dashboard | XER Analytics",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-st.components.v1.html(f"""
+GA_ID = "G-T364GPZF30"
+components.html(f"""
 <script async src="https://www.googletagmanager.com/gtag/js?id={GA_ID}"></script>
 <script>
 window.dataLayer = window.dataLayer || [];
@@ -21,21 +32,11 @@ gtag('config', '{GA_ID}');
 </script>
 """, height=0)
 
-# ─────────────────────────────────────────────
-# PAGE CONFIG
-# ─────────────────────────────────────────────
-st.set_page_config(
-    page_title="Project Controls Dashboard | XER Analytics",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-st.sidebar.image("profile.jpg", width=130)
+# ✅ FIX #2 — Company logo (place dogus_logo.jpeg next to app.py)
+st.sidebar.image("dogus_logo.jpeg", use_container_width=True)
 st.sidebar.markdown("### 👷 Project Controls Dashboard")
 st.sidebar.caption("by Ahmed Saad")
 
-st.info("Upload a Primavera XER file to analyze project performance.")
 # ─────────────────────────────────────────────
 # THEME
 # ─────────────────────────────────────────────
@@ -121,10 +122,6 @@ st.markdown(
 )
 
 
-# ─────────────────────────────────────────────
-# ✅ IMPROVEMENT #9 — chart_card context manager
-#    Replaces 25+ duplicate open/close div blocks
-# ─────────────────────────────────────────────
 @contextmanager
 def chart_card():
     st.markdown('<div class="chart-card">', unsafe_allow_html=True)
@@ -162,10 +159,12 @@ def kpi_card(label: str, value: str, sub: str = "", tag: str = "", tone: str = "
 
 # ─────────────────────────────────────────────
 # XER PARSER
+# ✅ FIX #3 — utf-8-sig decoding strips the BOM that P6 writes at the
+#    top of XER exports (previously the first %T header could be missed).
 # ─────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def parse_xer(upload_bytes: bytes):
-    text    = upload_bytes.decode("utf-8", errors="ignore").splitlines()
+    text    = upload_bytes.decode("utf-8-sig", errors="ignore").splitlines()
     tables  = {}
     current = None
     cols    = []
@@ -213,9 +212,6 @@ def safe_ratio(a, b) -> float:
         return 0.0
 
 
-# ─────────────────────────────────────────────
-# ✅ IMPROVEMENT #7 — Currency-aware money formatter
-# ─────────────────────────────────────────────
 def fmt_money(v: float, currency: str = "SAR") -> str:
     if abs(v) >= 1_000_000:
         return f"{currency} {v / 1_000_000:,.2f}M"
@@ -251,9 +247,6 @@ def style_plot(fig, height=360):
     return fig
 
 
-# ─────────────────────────────────────────────
-# ✅ IMPROVEMENT #10 — Conditional float bar colors
-# ─────────────────────────────────────────────
 def float_bar_colors(values) -> list:
     """Red for negative float (delayed), green for positive (available)."""
     return [COLORS["bad"] if v < 0 else COLORS["primary"] for v in values]
@@ -261,17 +254,31 @@ def float_bar_colors(values) -> list:
 
 # ─────────────────────────────────────────────
 # EV ENGINE
+# ✅ EVM-FIX #4 — Physical % scale is now detected ONCE at dataset level.
+#    The old per-row heuristic (value ≤ 1 → multiply by 100) silently turned
+#    a genuinely 0.5%-complete task into 50% complete. XER stores 0–100 in
+#    almost all versions; we only switch to fractional scale if the WHOLE
+#    dataset (including completed tasks) never exceeds 1.0.
 # ─────────────────────────────────────────────
-def earned_pct_from_task(row: pd.Series) -> float:
+def detect_phys_scale(task_df: pd.DataFrame) -> float:
+    started = task_df[task_df["status_code"].isin(["TK_Active", "TK_Complete"])]
+    if started.empty:
+        return 1.0
+    mx = pd.to_numeric(started["phys_complete_pct"], errors="coerce").max()
+    return 100.0 if (pd.notna(mx) and 0 < mx <= 1.0) else 1.0
+
+
+def earned_pct_from_task(row: pd.Series, phys_scale: float = 1.0) -> float:
     status   = row.get("status_code", "")
     pct_type = row.get("complete_pct_type", "")
 
     raw_phys = pd.to_numeric(row.get("phys_complete_pct", 0), errors="coerce") or 0.0
-    # ✅ IMPROVEMENT #2 — Auto-normalise: some P6 versions store 0–1 fraction, others 0–100
-    phys = raw_phys if raw_phys > 1.0 else raw_phys * 100
+    phys     = raw_phys * phys_scale
 
     target_work = pd.to_numeric(row.get("target_work_qty",    0), errors="coerce") or 0.0
     act_work    = pd.to_numeric(row.get("act_work_qty",       0), errors="coerce") or 0.0
+    # ✅ EVM-FIX #5 — Units % complete must include overtime units
+    act_ot_work = pd.to_numeric(row.get("act_ot_qty",         0), errors="coerce") or 0.0
     target_drtn = pd.to_numeric(row.get("target_drtn_hr_cnt", 0), errors="coerce") or 0.0
     remain_drtn = pd.to_numeric(row.get("remain_drtn_hr_cnt", 0), errors="coerce") or 0.0
 
@@ -282,7 +289,7 @@ def earned_pct_from_task(row: pd.Series) -> float:
     if pct_type == "CP_Phys":
         return max(0.0, min(1.0, safe_ratio(phys, 100)))
     if pct_type == "CP_Units" and target_work > 0:
-        return max(0.0, min(1.0, safe_ratio(act_work, target_work)))
+        return max(0.0, min(1.0, safe_ratio(act_work + act_ot_work, target_work)))
     if pct_type == "CP_Drtn" and target_drtn > 0:
         return max(0.0, min(1.0, safe_ratio(target_drtn - remain_drtn, target_drtn)))
     return max(0.0, min(1.0, safe_ratio(phys, 100)))
@@ -322,10 +329,6 @@ def allocate_linear(start, finish, value, cutoff=None):
     return out
 
 
-# ─────────────────────────────────────────────
-# ✅ IMPROVEMENT #5 — Weekly allocation helper
-#    Distributes hours across the actual work period by week
-# ─────────────────────────────────────────────
 def allocate_weekly(start, finish, value, cutoff=None):
     """Distribute value linearly across calendar weeks (Sun–Sat anchor)."""
     if pd.isna(start) or pd.isna(finish) or float(value) == 0:
@@ -340,8 +343,7 @@ def allocate_weekly(start, finish, value, cutoff=None):
             return {}
         finish = min(finish, cutoff)
     total_seconds = max((finish - start).total_seconds(), 1)
-    # Align to start-of-week (Sunday)
-    week_anchor = start - pd.Timedelta(days=start.weekday() + 1 if start.weekday() < 6 else 0)
+    week_anchor = start.normalize() - pd.Timedelta(days=(start.weekday() + 1) % 7)
     out = {}
     for week_start in pd.date_range(week_anchor, finish, freq="7D"):
         seg_s   = max(start, week_start)
@@ -354,6 +356,11 @@ def allocate_weekly(start, finish, value, cutoff=None):
 
 # ─────────────────────────────────────────────
 # S-CURVES
+# ✅ EVM-FIX #6 — EV is now time-phased over the task's ACTUAL execution
+#    window (actual start → actual finish / data date), not the baseline
+#    window. Per EVM practice PV follows the baseline; EV follows what
+#    actually happened. The old code spread EV over baseline dates, which
+#    distorted the historical earned curve.
 # ─────────────────────────────────────────────
 def build_time_curves(task_ev_df: pd.DataFrame, start, end, cutoff):
     planned_map = defaultdict(float)
@@ -365,17 +372,22 @@ def build_time_curves(task_ev_df: pd.DataFrame, start, end, cutoff):
         budget = float(row.get("task_budget",  0) or 0)
         ev     = float(row.get("earned_value", 0) or 0)
         ac     = float(row.get("actual_cost",  0) or 0)
+
+        # PV — baseline window, capped at cutoff
         for k, v in allocate_linear(ts, te, budget, cutoff=cutoff).items():
             planned_map[k] += v
-        for k, v in allocate_linear(ts, te, ev, cutoff=cutoff).items():
-            earned_map[k] += v
+
+        # EV & AC — actual execution window
         astart = row.get("act_start_date") if pd.notna(row.get("act_start_date")) else ts
         aend   = (
             row.get("act_end_date") if pd.notna(row.get("act_end_date"))
-            else (min(cutoff, te) if pd.notna(te) and pd.notna(cutoff) else te)
+            else (cutoff if pd.notna(cutoff) else te)
         )
+        for k, v in allocate_linear(astart, aend, ev, cutoff=cutoff).items():
+            earned_map[k] += v
         for k, v in allocate_linear(astart, aend, ac, cutoff=cutoff).items():
             actual_map[k] += v
+
     periods = list(pd.date_range(
         pd.Timestamp(start).to_period("M").to_timestamp(),
         pd.Timestamp(end).to_period("M").to_timestamp(),
@@ -391,9 +403,6 @@ def build_time_curves(task_ev_df: pd.DataFrame, start, end, cutoff):
     return out
 
 
-# ─────────────────────────────────────────────
-# ✅ IMPROVEMENT #11 — Proper PV per WBS group
-# ─────────────────────────────────────────────
 def compute_group_pv(group_df: pd.DataFrame, cutoff) -> float:
     """Compute Planned Value at cutoff for a subset of tasks."""
     total = 0.0
@@ -409,27 +418,60 @@ def compute_group_pv(group_df: pd.DataFrame, cutoff) -> float:
 
 # ─────────────────────────────────────────────
 # AREA / PARCEL INFERENCE
+# ✅ PARCEL-FIX #7 — Rebuilt:
+#    a) Column collision removed: ACTVCODE also carries actv_code_type_id,
+#       so the old double-merge produced duplicated/suffixed columns and
+#       the type filter could silently match nothing.
+#    b) The activity-code type is user-selectable in the sidebar; auto-
+#       default matches "area" / "parcel" / "zone" (case-insensitive,
+#       contains) instead of an exact lowercase equality on "area".
+#    c) Tasks carrying MORE THAN ONE code of the chosen type are no longer
+#       assigned arbitrarily — the lowest short_name wins deterministically
+#       and the count of multi-assigned tasks is reported.
 # ─────────────────────────────────────────────
-def infer_area_mapping(tables, task_df):
+def list_activity_code_types(tables) -> list:
+    actvtype = tables.get("ACTVTYPE", pd.DataFrame())
+    if actvtype.empty or "actv_code_type" not in actvtype.columns:
+        return []
+    return sorted(actvtype["actv_code_type"].dropna().astype(str).unique().tolist())
+
+
+def infer_area_mapping(tables, chosen_type: str | None):
+    empty = pd.DataFrame(columns=["task_id", "parcel_id", "parcel_name"]), 0
     taskactv = tables.get("TASKACTV", pd.DataFrame())
     actvcode = tables.get("ACTVCODE", pd.DataFrame())
     actvtype = tables.get("ACTVTYPE", pd.DataFrame())
     if taskactv.empty or actvcode.empty or actvtype.empty:
-        return pd.DataFrame(columns=["task_id", "parcel_id", "parcel_name"])
-    merged = taskactv.merge(actvcode, on="actv_code_id", how="left", suffixes=("", "_code"))
-    merged = merged.merge(actvtype[["actv_code_type_id", "actv_code_type"]], on="actv_code_type_id", how="left")
-    area = merged[merged["actv_code_type"].astype(str).str.lower().eq("area")].copy()
+        return empty
+
+    codes = actvcode.merge(
+        actvtype[["actv_code_type_id", "actv_code_type"]],
+        on="actv_code_type_id", how="left",
+    )
+    merged = taskactv[["task_id", "actv_code_id"]].merge(
+        codes, on="actv_code_id", how="left",
+    )
+
+    type_series = merged["actv_code_type"].astype(str)
+    if chosen_type:
+        area = merged[type_series.eq(chosen_type)].copy()
+    else:
+        area = merged[type_series.str.lower().str.contains(
+            "area|parcel|zone", na=False, regex=True)].copy()
     if area.empty:
-        return pd.DataFrame(columns=["task_id", "parcel_id", "parcel_name"])
+        return empty
+
     area["parcel_id"]   = area["short_name"].replace({"": np.nan}).fillna(area["actv_code_name"])
     area["parcel_name"] = area["actv_code_name"].replace({"": np.nan}).fillna(area["short_name"])
-    area = area[["task_id", "parcel_id", "parcel_name"]].drop_duplicates(subset=["task_id"])
-    return area
+
+    multi_count = int(area.duplicated(subset=["task_id"]).sum())
+    area = (
+        area.sort_values(["task_id", "parcel_id"])
+        .drop_duplicates(subset=["task_id"], keep="first")
+    )
+    return area[["task_id", "parcel_id", "parcel_name"]], multi_count
 
 
-# ─────────────────────────────────────────────
-# ✅ IMPROVEMENT #12 — @st.cache_data on build_parcel_df
-# ─────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def build_parcel_df(task_ev_df: pd.DataFrame, cutoff):
     if task_ev_df.empty:
@@ -437,25 +479,24 @@ def build_parcel_df(task_ev_df: pd.DataFrame, cutoff):
     parcel_group = task_ev_df.groupby(
         ["parcel_id", "parcel_name"], dropna=False, as_index=False
     ).agg(
-        bac=           ("task_budget",   "sum"),
-        ev=            ("earned_value",  "sum"),
-        ac=            ("actual_cost",   "sum"),
-        min_float=     ("float_days",    "min"),
-        active_tasks=  ("status_code",   lambda s: int((s == "TK_Active").sum())),
-        completed_tasks=("status_code",  lambda s: int((s == "TK_Complete").sum())),
-        total_tasks=   ("task_id",       "count"),
-        forecast_finish=("early_end_date",  "max"),
-        baseline_finish=("target_end_date", "max"),
+        bac=            ("task_budget",   "sum"),
+        ev=             ("earned_value",  "sum"),
+        ac=             ("actual_cost",   "sum"),
+        min_float=      ("float_days",    "min"),
+        active_tasks=   ("status_code",   lambda s: int((s == "TK_Active").sum())),
+        completed_tasks=("status_code",   lambda s: int((s == "TK_Complete").sum())),
+        total_tasks=    ("task_id",       "count"),
+        forecast_finish=("forecast_finish_date", "max"),
+        baseline_finish=("target_end_date",      "max"),
     )
-    # PV per parcel
     pv_list = []
     for pid, grp in task_ev_df.groupby("parcel_id", dropna=False):
         pv_list.append((pid, compute_group_pv(grp, cutoff)))
     pv_df        = pd.DataFrame(pv_list, columns=["parcel_id", "pv"])
     parcel_group = parcel_group.merge(pv_df, on="parcel_id", how="left")
     parcel_group["pv"]           = parcel_group["pv"].fillna(0.0)
-    parcel_group["plan_pct"]     = np.where(parcel_group["bac"] > 0, parcel_group["pv"]  / parcel_group["bac"] * 100, 0.0)
-    parcel_group["actual_pct"]   = np.where(parcel_group["bac"] > 0, parcel_group["ev"]  / parcel_group["bac"] * 100, 0.0)
+    parcel_group["plan_pct"]     = np.where(parcel_group["bac"] > 0, parcel_group["pv"] / parcel_group["bac"] * 100, 0.0)
+    parcel_group["actual_pct"]   = np.where(parcel_group["bac"] > 0, parcel_group["ev"] / parcel_group["bac"] * 100, 0.0)
     parcel_group["variance_pct"] = parcel_group["actual_pct"] - parcel_group["plan_pct"]
     parcel_group["delay_days"]   = np.where(
         parcel_group["baseline_finish"].notna() & parcel_group["forecast_finish"].notna(),
@@ -480,6 +521,8 @@ st.sidebar.markdown("## Primavera XER Input")
 uploaded_file = st.sidebar.file_uploader("Upload XER file", type=["xer", "txt"])
 
 if uploaded_file is None:
+    # ✅ FIX #8 — informational banner only shown pre-upload
+    st.info("Upload a Primavera XER file to analyze project performance.")
     st.markdown(
         """
         <div class="hero" style="text-align:center; max-width:980px; margin:40px auto; padding:70px 20px;">
@@ -501,7 +544,6 @@ if uploaded_file is None:
 # ─────────────────────────────────────────────
 # PARSE & LOAD
 # ─────────────────────────────────────────────
-# ✅ IMPROVEMENT #15 — Spinner while parsing
 with st.spinner("Parsing XER file…"):
     tables = parse_xer(uploaded_file.getvalue())
 
@@ -518,12 +560,13 @@ if project_df.empty or task_df.empty:
 # ─────────────────────────────────────────────
 # CLEAN DATA
 # ─────────────────────────────────────────────
-# Dates — task
+# ✅ EVM-FIX #9 — restart/reend dates parsed; reend_date is the correct
+#    forecast finish for in-progress activities (early_end can be stale).
 for col in ["act_start_date", "act_end_date", "target_start_date",
-            "target_end_date", "early_start_date", "early_end_date"]:
+            "target_end_date", "early_start_date", "early_end_date",
+            "restart_date", "reend_date"]:
     task_df[col] = to_date(task_df, col)
 
-# ✅ IMPROVEMENT #14 — Guard tr_df before iterating
 if not tr_df.empty:
     for col in ["target_start_date", "target_end_date", "act_start_date", "act_end_date"]:
         tr_df[col] = to_date(tr_df, col)
@@ -531,10 +574,15 @@ if not tr_df.empty:
                 "target_qty", "act_reg_qty", "act_ot_qty"]:
         tr_df[col] = to_num(tr_df, col)
 
-# Numerics — task
-for col in ["phys_complete_pct", "target_work_qty", "act_work_qty",
+for col in ["phys_complete_pct", "target_work_qty", "act_work_qty", "act_ot_qty",
             "target_drtn_hr_cnt", "remain_drtn_hr_cnt", "total_float_hr_cnt"]:
     task_df[col] = to_num(task_df, col)
+
+# ✅ EVM-FIX #10 — WBS summary rows (TT_WBS) removed from the calculation
+#    base. Keeping them double-counts budget/EV wherever summaries carry
+#    rolled-up values.
+if "task_type" in task_df.columns:
+    task_df = task_df[task_df["task_type"] != "TT_WBS"].copy()
 
 # ─────────────────────────────────────────────
 # PROJECT METADATA
@@ -547,7 +595,6 @@ plan_finish  = pd.to_datetime(project.get("plan_end_date",   ""), errors="coerce
 forecast_finish = pd.to_datetime(project.get("scd_end_date", ""), errors="coerce")
 data_date    = pd.to_datetime(project.get("last_recalc_date", ""), errors="coerce")
 
-# ✅ IMPROVEMENT #4 — End-of-day cutoff for complete daily accounting
 cutoff = (
     data_date.normalize() + pd.Timedelta(hours=23, minutes=59, seconds=59)
     if pd.notna(data_date) else data_date
@@ -558,36 +605,73 @@ cutoff = (
 # ─────────────────────────────────────────────
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Settings")
-# ✅ IMPROVEMENT #7 — Currency selector
 CURRENCY = st.sidebar.selectbox("Currency", ["SAR", "USD", "AED", "EGP"], index=0)
-# ✅ IMPROVEMENT #3 — Configurable working hours per day
 HOURS_PER_DAY = st.sidebar.number_input(
     "Hours per workday", min_value=1.0, max_value=24.0, value=8.0, step=0.5
 )
 
+# ✅ PARCEL-FIX #7c — user-selectable activity-code type driving parcels
+code_type_options = list_activity_code_types(tables)
+default_idx = 0
+for i, t in enumerate(code_type_options):
+    if any(k in t.lower() for k in ("area", "parcel", "zone")):
+        default_idx = i + 1
+        break
+PARCEL_CODE_TYPE = st.sidebar.selectbox(
+    "Parcel source (activity code type)",
+    ["(auto-detect)"] + code_type_options,
+    index=default_idx,
+)
+chosen_type = None if PARCEL_CODE_TYPE == "(auto-detect)" else PARCEL_CODE_TYPE
+
+# ✅ EVM-FIX #11 — selectable EAC formula (PMI standard set)
+EAC_METHOD = st.sidebar.selectbox(
+    "EAC formula",
+    ["AC + (BAC − EV) / CPI  (= BAC/CPI)",
+     "AC + (BAC − EV)  (remaining at budget rate)",
+     "AC + (BAC − EV) / (CPI × SPI)  (schedule-adjusted)"],
+    index=0,
+)
+
 # ─────────────────────────────────────────────
 # RESOURCE ROLLUP
+# ✅ MANHOUR-FIX #12 — TASKRSRC quantities are NOT all manhours. Material
+#    and equipment assignments carry huge unit counts (m³, tonnes, each)
+#    that were previously summed as "hours" — that is why weekly manhours
+#    showed millions. All manhour metrics now use LABOR resources only
+#    (RSRC.rsrc_type == 'RT_Labor'), and overtime hours are included.
+#    Cost rollups still include ALL resource types (correct for EVM).
 # ─────────────────────────────────────────────
+if not rsrc_df.empty and "rsrc_type" in rsrc_df.columns and not tr_df.empty and "rsrc_id" in tr_df.columns:
+    labor_ids = set(rsrc_df.loc[rsrc_df["rsrc_type"].astype(str).eq("RT_Labor"), "rsrc_id"])
+    tr_labor  = tr_df[tr_df["rsrc_id"].isin(labor_ids)].copy()
+else:
+    tr_labor = tr_df.copy()  # fallback: no RSRC table → cannot filter
+
 if not tr_df.empty:
     res_rollup = tr_df.groupby("task_id", as_index=False).agg(
         task_budget=("target_cost",  "sum"),
         actual_reg= ("act_reg_cost", "sum"),
         actual_ot=  ("act_ot_cost",  "sum"),
         remain_cost=("remain_cost",  "sum"),
-        target_qty= ("target_qty",   "sum"),
-        act_reg_qty=("act_reg_qty",  "sum"),
-        act_ot_qty= ("act_ot_qty",   "sum"),
     )
 else:
-    res_rollup = pd.DataFrame(columns=[
-        "task_id", "task_budget", "actual_reg", "actual_ot",
-        "remain_cost", "target_qty", "act_reg_qty", "act_ot_qty",
-    ])
+    res_rollup = pd.DataFrame(columns=["task_id", "task_budget", "actual_reg", "actual_ot", "remain_cost"])
+
+if not tr_labor.empty:
+    labor_rollup = tr_labor.groupby("task_id", as_index=False).agg(
+        labor_target_qty=("target_qty",  "sum"),
+        labor_reg_qty=   ("act_reg_qty", "sum"),
+        labor_ot_qty=    ("act_ot_qty",  "sum"),
+    )
+else:
+    labor_rollup = pd.DataFrame(columns=["task_id", "labor_target_qty", "labor_reg_qty", "labor_ot_qty"])
 
 model = task_df.merge(res_rollup, on="task_id", how="left")
+model = model.merge(labor_rollup, on="task_id", how="left")
 for c in ["task_budget", "actual_reg", "actual_ot", "remain_cost",
-          "target_qty",  "act_reg_qty", "act_ot_qty"]:
-    model[c] = pd.to_numeric(model[c], errors="coerce").fillna(0.0)
+          "labor_target_qty", "labor_reg_qty", "labor_ot_qty"]:
+    model[c] = pd.to_numeric(model.get(c), errors="coerce").fillna(0.0)
 
 # WBS names
 if not wbs_df.empty and "wbs_id" in model.columns:
@@ -597,8 +681,8 @@ if not wbs_df.empty and "wbs_id" in model.columns:
         on="wbs_id", how="left",
     )
 
-# Parcel (Area activity code → WBS fallback → UNASSIGNED)
-parcel_map = infer_area_mapping(tables, task_df)
+# Parcel (chosen activity code → WBS fallback → UNASSIGNED)
+parcel_map, multi_assigned = infer_area_mapping(tables, chosen_type)
 model = model.merge(parcel_map, on="task_id", how="left")
 model["parcel_id"] = (
     model["parcel_id"]
@@ -610,13 +694,42 @@ model["parcel_name"] = (
     .fillna(model.get("wbs_name", pd.Series(index=model.index, dtype=object)))
     .fillna(model["parcel_id"])
 )
+if multi_assigned > 0:
+    st.sidebar.warning(
+        f"{multi_assigned} task(s) carry multiple parcel codes — "
+        "first code (sorted) applied. Review coding in P6."
+    )
 
 # Derived metrics
+PHYS_SCALE = detect_phys_scale(model)
 model["actual_cost"]  = model["actual_reg"] + model["actual_ot"]
-model["earned_pct"]   = model.apply(earned_pct_from_task, axis=1)
+model["earned_pct"]   = model.apply(earned_pct_from_task, axis=1, phys_scale=PHYS_SCALE)
 model["earned_value"] = model["task_budget"] * model["earned_pct"]
-# ✅ IMPROVEMENT #3 — Use configurable hours per day
 model["float_days"]   = model["total_float_hr_cnt"] / HOURS_PER_DAY
+
+# ✅ EVM-FIX #13 — LOE activities earn EV = PV per PMI EVM standard
+#    (Level of Effort cannot generate schedule variance).
+if "task_type" in model.columns:
+    loe_mask = model["task_type"].eq("TT_LOE")
+    if loe_mask.any():
+        loe_pv = model.loc[loe_mask].apply(
+            lambda r: sum(allocate_linear(
+                r["target_start_date"], r["target_end_date"],
+                r["task_budget"], cutoff=cutoff).values()),
+            axis=1,
+        )
+        model.loc[loe_mask, "earned_value"] = loe_pv
+        model.loc[loe_mask, "earned_pct"]   = np.where(
+            model.loc[loe_mask, "task_budget"] > 0,
+            loe_pv / model.loc[loe_mask, "task_budget"], 0.0,
+        )
+
+# ✅ EVM-FIX #9 — per-task forecast finish: actual finish → reend → early end
+model["forecast_finish_date"] = (
+    model["act_end_date"]
+    .fillna(model.get("reend_date"))
+    .fillna(model["early_end_date"])
+)
 
 # ─────────────────────────────────────────────
 # SIDEBAR — FILTERS
@@ -648,25 +761,38 @@ BAC = float(view["task_budget"].sum())
 EV  = float(view["earned_value"].sum())
 AC  = float(view["actual_cost"].sum())
 
-# Build S-Curves first — PV is read from curves to avoid a second iterrows pass
 curve_start_candidates = [d for d in [plan_start, view["target_start_date"].min(), view["act_start_date"].min()] if pd.notna(d)]
 curve_end_candidates   = [d for d in [forecast_finish, data_date, view["target_end_date"].max(), view["act_end_date"].max()] if pd.notna(d)]
 curve_start = min(curve_start_candidates) if curve_start_candidates else pd.Timestamp.today().normalize()
 curve_end   = max(curve_end_candidates)   if curve_end_candidates   else pd.Timestamp.today().normalize()
 curves      = build_time_curves(view, curve_start, curve_end, cutoff)
 
-# ✅ IMPROVEMENT #1 — PV from curves (no duplicate iterrows loop)
 PV = float(curves["cum_planned"].iloc[-1]) if not curves.empty else 0.0
 
-SPI           = safe_ratio(EV, PV)
-CPI           = safe_ratio(EV, AC)
-plan_pct      = safe_ratio(PV, BAC) * 100
-actual_pct    = safe_ratio(EV, BAC) * 100
+# ✅ EVM-FIX #11 — full PMI metric set
+SPI  = safe_ratio(EV, PV)
+CPI  = safe_ratio(EV, AC)
+SV   = EV - PV
+CV   = EV - AC
+SV_P = safe_ratio(SV, PV) * 100
+CV_P = safe_ratio(CV, EV) * 100
+TCPI = safe_ratio(BAC - EV, BAC - AC) if (BAC - AC) != 0 else 0.0
+
+if EAC_METHOD.startswith("AC + (BAC − EV) / CPI"):
+    EAC = safe_ratio(BAC, CPI) if CPI else BAC
+elif EAC_METHOD.startswith("AC + (BAC − EV)  "):
+    EAC = AC + (BAC - EV)
+else:
+    denom = CPI * SPI
+    EAC = AC + safe_ratio(BAC - EV, denom) if denom else AC + (BAC - EV)
+
+ETC = EAC - AC
+VAC = BAC - EAC
+
+plan_pct       = safe_ratio(PV, BAC) * 100
+actual_pct     = safe_ratio(EV, BAC) * 100
 forecast_delay = int((forecast_finish - plan_finish).days) if pd.notna(forecast_finish) and pd.notna(plan_finish) else 0
 min_float      = float(view["float_days"].min()) if not view.empty else 0.0
-EAC            = safe_ratio(BAC, CPI) if CPI else BAC
-ETC            = EAC - AC
-VAC            = BAC - EAC
 completed      = int((view["status_code"] == "TK_Complete").sum())
 active         = int((view["status_code"] == "TK_Active").sum())
 not_started    = int((view["status_code"] == "TK_NotStart").sum())
@@ -680,18 +806,18 @@ status_tone = (
 )
 status_text = {"bad": "Critical", "warn": "Watch", "good": "Controlled"}[status_tone]
 
-# Parcel analytics
 parcel_df = build_parcel_df(view, cutoff)
 
 # ─────────────────────────────────────────────
 # MANPOWER
+# ✅ MANHOUR-FIX #12 — labor-only, OT included, full-history cumulative
 # ─────────────────────────────────────────────
-weekly = pd.DataFrame()
-if not tr_df.empty and "act_start_date" in tr_df.columns:
-    temp = tr_df[tr_df["task_id"].isin(view["task_id"])].copy()
-    temp = temp[temp["act_start_date"].notna() & (temp["act_reg_qty"] > 0)]
+weekly_full = pd.DataFrame()
+if not tr_labor.empty and "act_start_date" in tr_labor.columns:
+    temp = tr_labor[tr_labor["task_id"].isin(view["task_id"])].copy()
+    temp["act_total_qty"] = temp["act_reg_qty"] + temp["act_ot_qty"]
+    temp = temp[temp["act_start_date"].notna() & (temp["act_total_qty"] > 0)]
     if not temp.empty:
-        # ✅ IMPROVEMENT #5 — Distribute hours across work period by week
         week_map = defaultdict(float)
         for _, row in temp.iterrows():
             astart = row["act_start_date"]
@@ -699,18 +825,20 @@ if not tr_df.empty and "act_start_date" in tr_df.columns:
                 row.get("act_end_date") if pd.notna(row.get("act_end_date"))
                 else (cutoff if pd.notna(cutoff) else astart)
             )
-            for wk, hrs in allocate_weekly(astart, aend, row["act_reg_qty"], cutoff=cutoff).items():
+            for wk, hrs in allocate_weekly(astart, aend, row["act_total_qty"], cutoff=cutoff).items():
                 week_map[wk] += hrs
         if week_map:
-            weekly = (
+            weekly_full = (
                 pd.DataFrame(list(week_map.items()), columns=["week", "manhours"])
                 .sort_values("week")
-                .tail(13)
                 .reset_index(drop=True)
             )
+            weekly_full["cum"] = weekly_full["manhours"].cumsum()
 
-manhour_budget = float(view["target_qty"].sum())
-manhour_actual = float((view["act_reg_qty"] + view["act_ot_qty"]).sum())
+weekly = weekly_full.tail(13).reset_index(drop=True) if not weekly_full.empty else pd.DataFrame()
+
+manhour_budget = float(view["labor_target_qty"].sum())
+manhour_actual = float((view["labor_reg_qty"] + view["labor_ot_qty"]).sum())
 manhour_util   = safe_ratio(manhour_actual, manhour_budget) * 100
 
 # ─────────────────────────────────────────────
@@ -718,7 +846,6 @@ manhour_util   = safe_ratio(manhour_actual, manhour_budget) * 100
 # ─────────────────────────────────────────────
 risk_rows = []
 if forecast_delay > 0:
-    # ✅ IMPROVEMENT #6 — Dynamic probability based on delay magnitude
     prob = min(5, max(1, int(forecast_delay / 30)))
     risk_rows.append([
         "Schedule",
@@ -742,7 +869,7 @@ if CPI < 1:
     ])
 if manhour_budget > 0 and manhour_util < 95:
     risk_rows.append([
-        "Resources", f"Manhour utilisation is {manhour_util:.1f}% of budgeted profile.",
+        "Resources", f"Labor manhour utilisation is {manhour_util:.1f}% of budgeted profile.",
         4, 3, "Construction", "Active",
     ])
 for _, r in parcel_df.head(5).iterrows():
@@ -804,8 +931,8 @@ if SPI < 1:
     )
 
 row = st.columns(5)
-with row[0]: kpi_card("SPI",            f"{SPI:.2f}",  "Earned / Planned", "Behind" if SPI < 1 else "On plan",      performance_tone(SPI))
-with row[1]: kpi_card("CPI",            f"{CPI:.2f}",  "Earned / Actual",  "Controlled" if CPI >= 1 else "Pressure", performance_tone(CPI))
+with row[0]: kpi_card("SPI",            f"{SPI:.2f}",  f"SV {fmt_money(SV, CURRENCY)} ({SV_P:+.1f}%)", "Behind" if SPI < 1 else "On plan",      performance_tone(SPI))
+with row[1]: kpi_card("CPI",            f"{CPI:.2f}",  f"CV {fmt_money(CV, CURRENCY)} ({CV_P:+.1f}%)", "Controlled" if CPI >= 1 else "Pressure", performance_tone(CPI))
 with row[2]: kpi_card("Forecast delay", f"+{forecast_delay}d" if forecast_delay > 0 else "0d",
                        "vs baseline finish", "Overrun" if forecast_delay > 0 else "On time",
                        "bad" if forecast_delay > 0 else "good")
@@ -829,7 +956,8 @@ with tab_overview:
             st.markdown("### Project Info")
             info_df = pd.DataFrame({
                 "Metric": ["BL Start", "BL Finish", "Forecast Finish", "Delay",
-                           "Total Float", "BAC", "PV", "EV", "AC", "EAC", "VAC"],
+                           "Total Float", "BAC", "PV", "EV", "AC",
+                           "SV", "CV", "TCPI", "EAC", "ETC", "VAC"],
                 "Value": [
                     plan_start.strftime("%d %b %Y")      if pd.notna(plan_start)      else "-",
                     plan_finish.strftime("%d %b %Y")     if pd.notna(plan_finish)     else "-",
@@ -840,7 +968,11 @@ with tab_overview:
                     fmt_money(PV,  CURRENCY),
                     fmt_money(EV,  CURRENCY),
                     fmt_money(AC,  CURRENCY),
+                    fmt_money(SV,  CURRENCY),
+                    fmt_money(CV,  CURRENCY),
+                    f"{TCPI:.2f}",
                     fmt_money(EAC, CURRENCY),
+                    fmt_money(ETC, CURRENCY),
                     fmt_money(VAC, CURRENCY),
                 ],
             })
@@ -1018,7 +1150,7 @@ with tab_overview:
 
     with lower_right:
         with chart_card():
-            st.markdown("### Manhour Trend (13 Weeks)")
+            st.markdown("### Labor Manhour Trend (13 Weeks)")
             if not weekly.empty:
                 fig = px.bar(weekly, x="week", y="manhours")
                 fig.update_traces(marker_color=COLORS["primary"])
@@ -1086,7 +1218,6 @@ with tab_schedule:
         with chart_card():
             st.markdown("### Float Distribution by Parcel (Days)")
             plot_df = parcel_df.sort_values("min_float").head(10)
-            # ✅ IMPROVEMENT #10 — Conditional colors: red negative, green positive
             bar_colors = float_bar_colors(plot_df["min_float"].tolist())
             fig = px.bar(plot_df, x="min_float", y="parcel_id", orientation="h")
             fig.update_traces(marker_color=bar_colors)
@@ -1107,11 +1238,9 @@ with tab_parcels:
             "Variance %", "Float (D)", "Status", "Active", "Complete", "Total",
         ]
 
-        # ✅ IMPROVEMENT #8 — Styled dataframe with conditional colors
         def _style_parcel_row(row):
             styles = [""] * len(row)
             cols_list = list(row.index)
-            # Status column
             if "Status" in cols_list:
                 idx = cols_list.index("Status")
                 if row["Status"] == "DELAYED":
@@ -1120,7 +1249,6 @@ with tab_parcels:
                     styles[idx] = "background-color:#fff7ed; color:#f59e0b; font-weight:800"
                 else:
                     styles[idx] = "background-color:#ecfdf5; color:#10b981; font-weight:800"
-            # Variance column
             if "Variance %" in cols_list:
                 idx = cols_list.index("Variance %")
                 if row["Variance %"] < -10:
@@ -1177,7 +1305,6 @@ with tab_parcels:
         with chart_card():
             st.markdown("### Float by Parcel (Days)")
             sorted_pf  = parcel_df.sort_values("min_float")
-            # ✅ IMPROVEMENT #10 — Conditional colors
             bar_colors = float_bar_colors(sorted_pf["min_float"].tolist())
             fig = px.bar(sorted_pf, x="min_float", y="parcel_id", orientation="h")
             fig.update_traces(marker_color=bar_colors)
@@ -1188,11 +1315,13 @@ with tab_parcels:
 with tab_cost:
     cost_row = st.columns(5)
     with cost_row[0]: kpi_card("BAC", fmt_money(BAC, CURRENCY), "Budget at completion")
-    with cost_row[1]: kpi_card("EV",  fmt_money(EV,  CURRENCY), "Earned value")
-    with cost_row[2]: kpi_card("AC",  fmt_money(AC,  CURRENCY), "Actual cost")
-    with cost_row[3]: kpi_card("PV",  fmt_money(PV,  CURRENCY), "Planned value")
+    with cost_row[1]: kpi_card("EV",  fmt_money(EV,  CURRENCY), f"SV {fmt_money(SV, CURRENCY)}")
+    with cost_row[2]: kpi_card("AC",  fmt_money(AC,  CURRENCY), f"CV {fmt_money(CV, CURRENCY)}")
+    with cost_row[3]: kpi_card("TCPI", f"{TCPI:.2f}", "Efficiency needed to hit BAC",
+                                "Demanding" if TCPI > 1.05 else "Achievable",
+                                "bad" if TCPI > 1.1 else ("warn" if TCPI > 1.0 else "good"))
     with cost_row[4]: kpi_card(
-        "EAC", fmt_money(EAC, CURRENCY), "Estimate at completion",
+        "EAC", fmt_money(EAC, CURRENCY), f"ETC {fmt_money(ETC, CURRENCY)} · VAC {fmt_money(VAC, CURRENCY)}",
         "Overrun" if EAC > BAC else "Under budget",
         "bad" if EAC > BAC else "good",
     )
@@ -1238,7 +1367,6 @@ with tab_cost:
         fin_df["% Complete"] = fin_df["% Complete"].apply(lambda v: f"{v:.1f}%")
         st.dataframe(fin_df, use_container_width=True, hide_index=True)
 
-    # ✅ IMPROVEMENT #13 — Export to Excel
     st.markdown("---")
     if st.button("⬇ Export Financial Breakdown to Excel"):
         export_df = parcel_df[[
@@ -1264,39 +1392,40 @@ with tab_cost:
 # ── MANPOWER ──────────────────────────────────
 with tab_manpower:
     top = st.columns(4)
-    with top[0]: kpi_card("Cumulative manhours",
-                           f"{manhour_actual:,.0f} hrs", "Total hours expended")
+    with top[0]: kpi_card("Cumulative labor manhours",
+                           f"{manhour_actual:,.0f} hrs", "Labor resources only (incl. OT)")
     with top[1]: kpi_card("This period manhours",
                            f"{weekly['manhours'].iloc[-1]:,.0f} hrs" if not weekly.empty else "0 hrs",
                            "Current reporting week")
     with top[2]: kpi_card("Active tasks",
                            f"{len(view[view['status_code'] == 'TK_Active']):,}", "In progress")
     with top[3]: kpi_card("Manhour utilisation",
-                           f"{manhour_util:,.1f}%", "Actual vs budgeted",
+                           f"{manhour_util:,.1f}%", "Actual vs budgeted labor hours",
                            "High" if manhour_util > 95 else "Low",
                            "good" if manhour_util > 95 else "warn")
 
     m1, m2, m3 = st.columns([1.45, 1.45, 1.25])
     with m1:
         with chart_card():
-            st.markdown("### Weekly Manhour Histogram")
+            st.markdown("### Weekly Labor Manhour Histogram (13 Weeks)")
             if not weekly.empty:
                 fig = px.bar(weekly, x="week", y="manhours")
                 fig.update_traces(marker_color=COLORS["primary"])
             else:
                 fig = go.Figure()
-                fig.add_annotation(text="No manhour data available.",
+                fig.add_annotation(text="No labor manhour data available.",
                                     x=0.5, y=0.5, xref="paper", yref="paper", showarrow=False)
             st.plotly_chart(style_plot(fig, 330), use_container_width=True)
 
     with m2:
         with chart_card():
-            st.markdown("### Cumulative Manhours Trend")
-            if not weekly.empty:
-                week2       = weekly.copy()
-                week2["cum"] = week2["manhours"].cumsum()
+            st.markdown("### Cumulative Labor Manhours — Full History")
+            # ✅ MANHOUR-FIX #12 — cumulative over the WHOLE project history,
+            #    not just the last 13 weeks (the old cumsum on the tail
+            #    understated the curve and restarted it from zero).
+            if not weekly_full.empty:
                 fig = go.Figure(go.Scatter(
-                    x=week2["week"], y=week2["cum"],
+                    x=weekly_full["week"], y=weekly_full["cum"],
                     mode="lines+markers", fill="tozeroy",
                     line=dict(color=COLORS["primary"], width=3),
                 ))
@@ -1306,13 +1435,19 @@ with tab_manpower:
 
     with m3:
         with chart_card():
-            st.markdown("### Manhours by Parcel")
+            st.markdown("### Budgeted Labor Manhours by Parcel")
             mh = (
                 view.groupby("parcel_id", as_index=False)
-                .agg(manhours=("target_qty", "sum"))
+                .agg(manhours=("labor_target_qty", "sum"))
                 .sort_values("manhours", ascending=False)
             )
-            fig = px.pie(mh, names="parcel_id", values="manhours", hole=0.48)
+            mh = mh[mh["manhours"] > 0]
+            top10 = mh.head(10).copy()
+            other = mh["manhours"].iloc[10:].sum()
+            if other > 0:
+                top10 = pd.concat([top10, pd.DataFrame(
+                    [{"parcel_id": "Other", "manhours": other}])], ignore_index=True)
+            fig = px.pie(top10, names="parcel_id", values="manhours", hole=0.48)
             st.plotly_chart(style_plot(fig, 330), use_container_width=True)
 
 
@@ -1340,7 +1475,6 @@ with tab_risk:
         with chart_card():
             st.markdown("### Risk Register")
             if not risk_df.empty:
-                # ✅ IMPROVEMENT #8 — Colored severity column
                 def _color_severity(val):
                     if val == "Critical": return "background-color:#fef2f2; color:#ef4444; font-weight:800"
                     if val == "High":     return "background-color:#fff7ed; color:#f59e0b; font-weight:800"
@@ -1381,7 +1515,6 @@ with tab_risk:
         if not risk_df.empty:
             plot       = risk_df.copy().sort_values("score", ascending=True)
             plot["label"] = plot["category"] + " — " + plot["risk_description"].str[:45]
-            # ✅ Conditional colors by severity
             sev_color = np.where(
                 plot["severity"].astype(str) == "Critical", COLORS["bad"],
                 np.where(plot["severity"].astype(str) == "High", COLORS["warn"], COLORS["primary"]),
@@ -1399,31 +1532,42 @@ with tab_risk:
 st.sidebar.markdown("---")
 with st.sidebar.expander("🔍 Debug EV / SPI"):
     st.write({
-        "BAC":        round(BAC,  2),
-        "PV":         round(PV,   2),
-        "EV":         round(EV,   2),
-        "AC":         round(AC,   2),
-        "EAC":        round(EAC,  2),
-        "VAC":        round(VAC,  2),
-        "Plan %":     round(plan_pct,   4),
-        "Actual %":   round(actual_pct, 4),
-        "SPI":        round(SPI,  6),
-        "CPI":        round(CPI,  6),
-        "Cutoff":     str(cutoff),
-        "Currency":   CURRENCY,
-        "Hours/Day":  HOURS_PER_DAY,
+        "BAC":         round(BAC,  2),
+        "PV":          round(PV,   2),
+        "EV":          round(EV,   2),
+        "AC":          round(AC,   2),
+        "SV":          round(SV,   2),
+        "CV":          round(CV,   2),
+        "TCPI":        round(TCPI, 4),
+        "EAC":         round(EAC,  2),
+        "ETC":         round(ETC,  2),
+        "VAC":         round(VAC,  2),
+        "Plan %":      round(plan_pct,   4),
+        "Actual %":    round(actual_pct, 4),
+        "SPI":         round(SPI,  6),
+        "CPI":         round(CPI,  6),
+        "Cutoff":      str(cutoff),
+        "Phys scale":  PHYS_SCALE,
+        "EAC method":  EAC_METHOD,
+        "Labor rows":  int(len(tr_labor)),
+        "All TASKRSRC rows": int(len(tr_df)),
+        "Currency":    CURRENCY,
+        "Hours/Day":   HOURS_PER_DAY,
     })
 
 st.sidebar.markdown(
     '<div class="small-note">'
-    "Parcel IDs come from the Primavera <b>Area</b> activity code when present; "
-    "otherwise the WBS short name is used as fallback."
+    "Parcel IDs come from the selected Primavera activity-code type when present; "
+    "otherwise the WBS short name is used as fallback. "
+    "Manhour metrics use <b>labor resources only</b> (RT_Labor), incl. overtime."
     "</div>",
     unsafe_allow_html=True,
 )
 
 st.caption(
-    "Dashboard matches Primavera closely on BAC, EV, AC, SPI, and progress %. "
-    "Exact parity is not always possible from XER alone — P6 applies internal calendar, "
-    "spread, and summarisation rules not fully exported in XER format."
+    "Dashboard aligns with PMI EVM practice (PMBOK / Practice Standard for EVM): "
+    "PV time-phased on baseline dates, EV on actual execution dates, LOE earns EV = PV, "
+    "WBS summaries excluded, labor/non-labor separated. Exact parity with P6 is not always "
+    "possible from XER alone — P6 applies internal calendar, spread, and summarisation rules "
+    "not fully exported in XER format."
 )
