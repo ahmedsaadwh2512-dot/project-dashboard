@@ -252,6 +252,43 @@ def float_bar_colors(values) -> list:
     return [COLORS["bad"] if v < 0 else COLORS["primary"] for v in values]
 
 
+# ✅ READABILITY-FIX #16 — helpers for presentable categorical charts
+def trunc(s, limit: int = 26) -> str:
+    s = str(s).strip()
+    return s if len(s) <= limit else s[: limit - 1].rstrip() + "…"
+
+
+def topn_with_other(df: pd.DataFrame, cat_col: str, val_col: str, n: int = 10) -> pd.DataFrame:
+    """Keep the n largest categories; merge the remainder into 'Other'."""
+    d = df[[cat_col, val_col]].copy().sort_values(val_col, ascending=False)
+    top = d.head(n).copy()
+    other = float(d[val_col].iloc[n:].sum())
+    if other > 0:
+        top = pd.concat([top, pd.DataFrame([{cat_col: "Other", val_col: other}])],
+                        ignore_index=True)
+    return top
+
+
+# ✅ READABILITY-FIX #17 — roll uncoded tasks up to LEVEL-2 WBS
+#    (ENGINEERING / CONSTRUCTION / PROCUREMENT …) instead of the leaf
+#    wbs_name, which fragmented parcels into dozens of tiny slivers
+#    (Light Pole, Tower Crane, …).
+def wbs_level2_map(wbs_df: pd.DataFrame) -> dict:
+    if wbs_df.empty or "wbs_id" not in wbs_df.columns:
+        return {}
+    parent = dict(zip(wbs_df["wbs_id"], wbs_df.get("parent_wbs_id", pd.Series(dtype=object))))
+    names  = dict(zip(wbs_df["wbs_id"], wbs_df.get("wbs_name",      pd.Series(dtype=object))))
+    ids_in = set(wbs_df["wbs_id"])
+    out = {}
+    for wid in wbs_df["wbs_id"]:
+        node, prev, seen = wid, wid, set()
+        while node in ids_in and parent.get(node) in ids_in and node not in seen:
+            seen.add(node)
+            prev, node = node, parent[node]
+        out[wid] = names.get(prev) or names.get(wid) or ""
+    return out
+
+
 # ─────────────────────────────────────────────
 # EV ENGINE
 # ✅ EVM-FIX #4 — Physical % scale is now detected ONCE at dataset level.
@@ -703,9 +740,11 @@ if not wbs_df.empty and "wbs_id" in model.columns:
 #    programmes is just a sequence number ("1", "2", "4") and unreadable.
 parcel_map, multi_assigned = infer_area_mapping(tables, chosen_type)
 model = model.merge(parcel_map, on="task_id", how="left")
-wbs_name_fb = model.get("wbs_name", pd.Series(index=model.index, dtype=object))
-model["parcel_id"]   = model["parcel_id"].fillna(wbs_name_fb).fillna("UNASSIGNED")
-model["parcel_name"] = model["parcel_name"].fillna(wbs_name_fb).fillna(model["parcel_id"])
+# ✅ READABILITY-FIX #17 — fallback = level-2 WBS bucket, not leaf name
+l2map = wbs_level2_map(wbs_df)
+wbs_l2_fb = model["wbs_id"].map(l2map) if "wbs_id" in model.columns else pd.Series(index=model.index, dtype=object)
+model["parcel_id"]   = model["parcel_id"].fillna(wbs_l2_fb).fillna("UNASSIGNED")
+model["parcel_name"] = model["parcel_name"].fillna(wbs_l2_fb).fillna(model["parcel_id"])
 model["parcel_id"]   = model["parcel_id"].astype(str)
 model["parcel_name"] = model["parcel_name"].astype(str)
 if multi_assigned > 0:
@@ -821,6 +860,9 @@ status_tone = (
 status_text = {"bad": "Critical", "warn": "Watch", "good": "Controlled"}[status_tone]
 
 parcel_df = build_parcel_df(view, cutoff)
+if not parcel_df.empty:
+    # ✅ READABILITY-FIX #16 — short display label for chart axes
+    parcel_df["label"] = parcel_df["parcel_id"].astype(str).apply(trunc)
 
 # ─────────────────────────────────────────────
 # MANPOWER
@@ -956,8 +998,8 @@ with row[4]: kpi_card("Forecast finish", forecast_finish.strftime("%d %b %Y") if
 # ─────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────
-tab_overview, tab_schedule, tab_parcels, tab_cost, tab_manpower, tab_risk = st.tabs([
-    "Overview", "Schedule", "Parcels", "Cost & EV", "Manpower", "Risk",
+tab_overview, tab_schedule, tab_parcels, tab_activities, tab_cost, tab_manpower, tab_risk = st.tabs([
+    "Overview", "Schedule", "Parcels", "Activities", "Cost & EV", "Manpower", "Risk",
 ])
 
 
@@ -1144,15 +1186,15 @@ with tab_overview:
 
     with lower_mid:
         with chart_card():
-            st.markdown("### Parcel Actual vs. Plan %")
-            parcel_plot = parcel_df.sort_values("actual_pct", ascending=False).head(10)
+            st.markdown("### Parcel Actual vs. Plan % (Top 8 by Budget)")
+            parcel_plot = parcel_df.sort_values("bac", ascending=False).head(8)
             fig = go.Figure()
             fig.add_trace(go.Bar(
-                x=parcel_plot["parcel_id"], y=parcel_plot["plan_pct"],
+                x=parcel_plot["label"], y=parcel_plot["plan_pct"],
                 name="Plan%", marker_color="#e5e7eb",
             ))
             fig.add_trace(go.Bar(
-                x=parcel_plot["parcel_id"], y=parcel_plot["actual_pct"],
+                x=parcel_plot["label"], y=parcel_plot["actual_pct"],
                 name="Actual%",
                 marker_color=np.where(
                     parcel_plot["status"].eq("DELAYED"),    COLORS["bad"],
@@ -1231,11 +1273,15 @@ with tab_schedule:
     with c2:
         with chart_card():
             st.markdown("### Float Distribution by Parcel (Days)")
-            plot_df = parcel_df.sort_values("min_float").head(10)
+            plot_df = parcel_df.sort_values("min_float").head(10).iloc[::-1]
             bar_colors = float_bar_colors(plot_df["min_float"].tolist())
-            fig = px.bar(plot_df, x="min_float", y="parcel_id", orientation="h")
-            fig.update_traces(marker_color=bar_colors)
-            st.plotly_chart(style_plot(fig, 350), use_container_width=True)
+            fig = go.Figure(go.Bar(
+                x=plot_df["min_float"], y=plot_df["label"], orientation="h",
+                marker_color=bar_colors,
+                text=[fmt_days(v) for v in plot_df["min_float"]],
+                textposition="outside",
+            ))
+            st.plotly_chart(style_plot(fig, 380), use_container_width=True)
 
 
 # ── PARCELS ───────────────────────────────────
@@ -1285,44 +1331,131 @@ with tab_parcels:
         )
         st.dataframe(styled_table, use_container_width=True, hide_index=True)
 
-    p1, p2, p3 = st.columns(3)
+    p1, p2 = st.columns(2)
     with p1:
         with chart_card():
-            st.markdown("### Actual % — All Parcels")
-            fig = px.bar(
-                parcel_df, x="parcel_id", y="actual_pct", color="status",
-                color_discrete_map={
-                    "ON PLAN":    COLORS["good"],
-                    "MINOR DELAY": COLORS["warn"],
-                    "DELAYED":    COLORS["bad"],
-                },
-            )
-            st.plotly_chart(style_plot(fig, 330), use_container_width=True)
+            st.markdown("### Actual % — Top 12 Parcels by Budget")
+            plot12 = parcel_df.sort_values("bac", ascending=False).head(12).iloc[::-1]
+            fig = go.Figure(go.Bar(
+                x=plot12["actual_pct"], y=plot12["label"], orientation="h",
+                marker_color=np.where(
+                    plot12["status"].eq("DELAYED"),     COLORS["bad"],
+                    np.where(plot12["status"].eq("MINOR DELAY"), COLORS["warn"], COLORS["good"]),
+                ),
+                text=[f"{v:.1f}%" for v in plot12["actual_pct"]],
+                textposition="outside",
+            ))
+            fig.update_xaxes(title="Actual %")
+            st.plotly_chart(style_plot(fig, 480), use_container_width=True)
 
     with p2:
         with chart_card():
-            st.markdown("### Plan vs Actual Comparison")
+            st.markdown("### Plan vs Actual — Top 12 Parcels by Budget")
             fig = go.Figure()
-            fig.add_trace(go.Bar(x=parcel_df["parcel_id"], y=parcel_df["plan_pct"],
+            fig.add_trace(go.Bar(y=plot12["label"], x=plot12["plan_pct"], orientation="h",
                                   name="Plan%",   marker_color="#e5e7eb"))
             fig.add_trace(go.Bar(
-                x=parcel_df["parcel_id"], y=parcel_df["actual_pct"], name="Actual%",
+                y=plot12["label"], x=plot12["actual_pct"], orientation="h", name="Actual%",
                 marker_color=np.where(
-                    parcel_df["status"].eq("DELAYED"),     COLORS["bad"],
-                    np.where(parcel_df["status"].eq("MINOR DELAY"), COLORS["warn"], COLORS["primary"]),
+                    plot12["status"].eq("DELAYED"),     COLORS["bad"],
+                    np.where(plot12["status"].eq("MINOR DELAY"), COLORS["warn"], COLORS["primary"]),
                 ),
             ))
             fig.update_layout(barmode="group")
-            st.plotly_chart(style_plot(fig, 330), use_container_width=True)
+            fig.update_xaxes(title="Percent")
+            st.plotly_chart(style_plot(fig, 480), use_container_width=True)
 
-    with p3:
-        with chart_card():
-            st.markdown("### Float by Parcel (Days)")
-            sorted_pf  = parcel_df.sort_values("min_float")
-            bar_colors = float_bar_colors(sorted_pf["min_float"].tolist())
-            fig = px.bar(sorted_pf, x="min_float", y="parcel_id", orientation="h")
-            fig.update_traces(marker_color=bar_colors)
-            st.plotly_chart(style_plot(fig, 330), use_container_width=True)
+    with chart_card():
+        st.markdown("### Float by Parcel — 12 Most Critical (Days)")
+        sorted_pf  = parcel_df.sort_values("min_float").head(12).iloc[::-1]
+        bar_colors = float_bar_colors(sorted_pf["min_float"].tolist())
+        fig = go.Figure(go.Bar(
+            x=sorted_pf["min_float"], y=sorted_pf["label"], orientation="h",
+            marker_color=bar_colors,
+            text=[fmt_days(v) for v in sorted_pf["min_float"]],
+            textposition="outside",
+        ))
+        fig.update_xaxes(title="Minimum Total Float (days)")
+        st.plotly_chart(style_plot(fig, 460), use_container_width=True)
+
+
+# ── ACTIVITIES ────────────────────────────────
+# ✅ NEW TAB #18 — activity-level explorer: search, sort, and export the
+#    full task register (the detail that was overcrowding the parcel charts).
+with tab_activities:
+    f1, f2, f3 = st.columns([2.2, 1.2, 1.2])
+    with f1:
+        search_txt = st.text_input("Search activity ID / name", "")
+    with f2:
+        act_status = st.selectbox("Status", ["All", "TK_NotStart", "TK_Active", "TK_Complete"])
+    with f3:
+        act_sort = st.selectbox("Sort by", ["Total Float ↑", "Budget ↓", "Earned % ↑", "Forecast Finish ↑"])
+
+    act = view.copy()
+    if search_txt.strip():
+        s = search_txt.strip().lower()
+        code_col = act.get("task_code", pd.Series("", index=act.index)).astype(str)
+        name_col = act.get("task_name", pd.Series("", index=act.index)).astype(str)
+        act = act[code_col.str.lower().str.contains(s, na=False)
+                  | name_col.str.lower().str.contains(s, na=False)]
+    if act_status != "All":
+        act = act[act["status_code"] == act_status]
+
+    sort_map = {
+        "Total Float ↑":     ("float_days", True),
+        "Budget ↓":          ("task_budget", False),
+        "Earned % ↑":        ("earned_pct", True),
+        "Forecast Finish ↑": ("forecast_finish_date", True),
+    }
+    sc, asc = sort_map[act_sort]
+    act = act.sort_values(sc, ascending=asc)
+
+    st.markdown(
+        f'<div class="small-note">{len(act):,} activities shown '
+        f'({int((act["float_days"] < 0).sum())} with negative float)</div>',
+        unsafe_allow_html=True,
+    )
+
+    show = pd.DataFrame({
+        "Activity ID":     act.get("task_code", ""),
+        "Activity Name":   act.get("task_name", ""),
+        "Parcel":          act["parcel_id"],
+        "Status":          act["status_code"].map({
+                               "TK_NotStart": "Not Started",
+                               "TK_Active":   "In Progress",
+                               "TK_Complete": "Completed"}).fillna(act["status_code"]),
+        "BL Start":        act["target_start_date"].dt.strftime("%d-%b-%y"),
+        "BL Finish":       act["target_end_date"].dt.strftime("%d-%b-%y"),
+        "Forecast Finish": act["forecast_finish_date"].dt.strftime("%d-%b-%y"),
+        "Float (d)":       act["float_days"].round(1),
+        "Earned %":        (act["earned_pct"] * 100).round(1),
+        "Budget":          act["task_budget"].round(0),
+        "Earned Value":    act["earned_value"].round(0),
+    })
+
+    def _float_color(v):
+        try:
+            if float(v) < 0:
+                return "color:#ef4444; font-weight:700"
+            if float(v) <= 5:
+                return "color:#f59e0b; font-weight:700"
+        except Exception:
+            pass
+        return ""
+
+    st.dataframe(
+        show.style.map(_float_color, subset=["Float (d)"])
+            .format({"Budget": "{:,.0f}", "Earned Value": "{:,.0f}",
+                     "Float (d)": "{:+.1f}", "Earned %": "{:.1f}"}),
+        use_container_width=True, hide_index=True, height=520,
+    )
+
+    st.download_button(
+        "⬇ Export shown activities (CSV)",
+        data=show.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"{project_name}_activities.csv",
+        mime="text/csv",
+    )
 
 
 # ── COST & EV ─────────────────────────────────
@@ -1343,21 +1476,23 @@ with tab_cost:
     c1, c2, c3 = st.columns([1.2, 1.25, 1.2])
     with c1:
         with chart_card():
-            st.markdown("### Budget Distribution by Parcel")
-            fig = px.pie(parcel_df, names="parcel_id", values="bac", hole=0.45)
-            st.plotly_chart(style_plot(fig, 340), use_container_width=True)
+            st.markdown("### Budget Distribution — Top 10 Parcels")
+            pie_df = topn_with_other(parcel_df, "label", "bac", n=10)
+            fig = px.pie(pie_df, names="label", values="bac", hole=0.45)
+            fig.update_traces(textposition="inside", textinfo="percent")
+            st.plotly_chart(style_plot(fig, 400), use_container_width=True)
 
     with c2:
         with chart_card():
-            st.markdown("### EV vs Planned Value — Parcel")
-            plot_df = parcel_df.sort_values("bac", ascending=False).head(8)
+            st.markdown("### EV vs Planned Value — Top 8 Parcels")
+            plot_df = parcel_df.sort_values("bac", ascending=False).head(8).iloc[::-1]
             fig = go.Figure()
-            fig.add_trace(go.Bar(x=plot_df["parcel_id"], y=plot_df["pv"],
+            fig.add_trace(go.Bar(y=plot_df["label"], x=plot_df["pv"], orientation="h",
                                   name="Planned Value", marker_color="#e5e7eb"))
-            fig.add_trace(go.Bar(x=plot_df["parcel_id"], y=plot_df["ev"],
+            fig.add_trace(go.Bar(y=plot_df["label"], x=plot_df["ev"], orientation="h",
                                   name="Earned Value",  marker_color=COLORS["primary"]))
             fig.update_layout(barmode="group")
-            st.plotly_chart(style_plot(fig, 340), use_container_width=True)
+            st.plotly_chart(style_plot(fig, 400), use_container_width=True)
 
     with c3:
         with chart_card():
@@ -1370,7 +1505,7 @@ with tab_cost:
                                      fill="tozeroy", fillcolor="rgba(24,183,160,0.10)"))
             fig.add_trace(go.Scatter(x=curves["period"], y=curves["cum_actual"],
                                      name="Actual Cost",   line=dict(color=COLORS["warn"], width=3)))
-            st.plotly_chart(style_plot(fig, 340), use_container_width=True)
+            st.plotly_chart(style_plot(fig, 400), use_container_width=True)
 
     with chart_card():
         st.markdown("### Financial Breakdown")
@@ -1453,16 +1588,13 @@ with tab_manpower:
             mh = (
                 view.groupby("parcel_id", as_index=False)
                 .agg(manhours=("labor_target_qty", "sum"))
-                .sort_values("manhours", ascending=False)
             )
+            mh["parcel_id"] = mh["parcel_id"].astype(str).apply(trunc)
             mh = mh[mh["manhours"] > 0]
-            top10 = mh.head(10).copy()
-            other = mh["manhours"].iloc[10:].sum()
-            if other > 0:
-                top10 = pd.concat([top10, pd.DataFrame(
-                    [{"parcel_id": "Other", "manhours": other}])], ignore_index=True)
+            top10 = topn_with_other(mh, "parcel_id", "manhours", n=10)
             fig = px.pie(top10, names="parcel_id", values="manhours", hole=0.48)
-            st.plotly_chart(style_plot(fig, 330), use_container_width=True)
+            fig.update_traces(textposition="inside", textinfo="percent")
+            st.plotly_chart(style_plot(fig, 380), use_container_width=True)
 
 
 # ── RISK ──────────────────────────────────────
