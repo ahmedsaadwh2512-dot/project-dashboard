@@ -56,12 +56,20 @@ def palette(mode: str = "dark") -> dict:
 
 
 def inject_css(st, mode: str = "dark") -> None:
+    """
+    Inject the stylesheet.
+
+    Streamlit renders st.markdown through a Markdown parser even when
+    unsafe_allow_html is set. Two things break a <style> block there: a
+    blank line, which ends raw-HTML mode, and four-space indentation,
+    which is read as a code fence. Either one dumps the whole stylesheet
+    onto the page as text. The CSS is therefore flattened to unindented,
+    blank-line-free lines before it is emitted, and the fonts arrive by
+    @import rather than a <link> tag, which Streamlit strips.
+    """
     c = palette(mode)
-    st.markdown(
-        f"""
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<style>
+    css = f"""
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
   :root {{
     --ground:{c['ground']}; --panel:{c['panel']}; --panel-high:{c['panel_high']};
     --rule:{c['rule']}; --text:{c['text']}; --muted:{c['muted']};
@@ -158,10 +166,9 @@ def inject_css(st, mode: str = "dark") -> None:
   footer, #MainMenu {{ visibility:hidden; }}
 
   @media (prefers-reduced-motion: reduce) {{ * {{ animation:none !important; transition:none !important; }} }}
-</style>
-        """,
-        unsafe_allow_html=True,
-    )
+"""
+    flat = "\n".join(line.strip() for line in css.splitlines() if line.strip())
+    st.markdown(f"<style>{flat}</style>", unsafe_allow_html=True)
 
 
 def register_plotly(mode: str = "dark") -> str:
