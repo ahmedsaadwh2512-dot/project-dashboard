@@ -14,6 +14,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import analytics as an
+import charts
 import evm
 import theme
 import xer_parser as xp
@@ -76,7 +77,7 @@ def load(raw: bytes, divisor: float):
     fb = xp.default_calendar(cals, tables)
     header = xp.project_header(tables)
     wbs = xp.wbs_tree(tables)
-    acts = evm.build_activities(tables, wbs, labour_divisor=divisor)
+    acts = evm.build_activities(tables, wbs, cals, fb, header.data_date, divisor)
     return tables, cals, fb, header, wbs, acts
 
 
@@ -101,7 +102,7 @@ if physical_only:
 
 daily = evm.time_phase(scope, calendars, fallback, data_date)
 periods = evm.to_periods(daily, freq)
-m = evm.summarise(scope, periods, data_date)
+m = evm.summarise(scope, periods, data_date, tables.get('PROJWBS'))
 
 
 def money(v, unit="M"):
@@ -150,9 +151,9 @@ tabs = st.tabs([
 with tabs[0]:
     cols = st.columns(4)
     cols[0].markdown(theme.kpi(
-        "Earned progress", pct(m["earned_pct"]),
+        "Earned progress", pct(m["performance_pct"]),
         f"EV SAR {money(m['ev'])} of {money(m['bac'])}",
-        theme.gauge_strip(m["planned_pct"], m["earned_pct"]), accent=True),
+        theme.gauge_strip(m["schedule_pct"], m["performance_pct"]), accent=True),
         unsafe_allow_html=True)
     cols[1].markdown(theme.kpi(
         "Schedule variance", f"SAR {money(m['sv'])}",
@@ -174,12 +175,7 @@ with tabs[0]:
             "time and is the figure to report.", caution=True), unsafe_allow_html=True)
 
     st.markdown("#### Progress by main WBS")
-    roll = evm.rollup(scope, {}, "wbs_main")
-    pv_by = {}
-    for name, g in scope.groupby("wbs_main"):
-        gp = evm.to_periods(evm.time_phase(g, calendars, fallback, data_date), freq)
-        pv_by[name] = float(gp.loc[gp["period"] <= data_date, "pv"].sum()) if not gp.empty else 0.0
-    roll = evm.rollup(scope, pv_by, "wbs_main")
+    roll = evm.rollup(scope, "wbs_main")
 
     for _, r in roll.iterrows():
         measurable = r["bac"] > 0
@@ -226,28 +222,13 @@ with tabs[1]:
     node = scope.copy()
     node["node"] = node["wbs_id"].map(at_level).fillna("—")
 
-    pv_node = {}
-    for name, g in node.groupby("node"):
-        gp = evm.to_periods(evm.time_phase(g, calendars, fallback, data_date), freq)
-        pv_node[name] = float(gp.loc[gp["period"] <= data_date, "pv"].sum()) if not gp.empty else 0.0
-    tbl = evm.rollup(node, pv_node, "node")
+    tbl = evm.rollup(node, "node")
     shown = tbl[tbl["bac"] > 0].head(25).iloc[::-1]
 
     if shown.empty:
         st.markdown(theme.note("No cost-bearing activities at this level."), unsafe_allow_html=True)
     else:
-        fig = go.Figure()
-        fig.add_bar(y=shown["node"], x=shown["earned_pct"] * 100, orientation="h",
-                    name="Earned", marker_color=C["accent"],
-                    customdata=np.stack([shown["bac"] / 1e6, shown["activities"]], axis=-1),
-                    hovertemplate="%{y}<br>Earned %{x:.1f}%<br>BAC SAR %{customdata[0]:.1f}M"
-                                  "<br>%{customdata[1]} activities<extra></extra>")
-        fig.add_trace(go.Scatter(
-            y=shown["node"], x=shown["planned_pct"] * 100, mode="markers", name="Planned",
-            marker=dict(symbol="line-ns", size=18, line=dict(width=2, color=C["text"])),
-            hovertemplate="Planned %{x:.1f}%<extra></extra>"))
-        fig.update_layout(template=TPL, height=max(320, 26 * len(shown)), barmode="overlay",
-                          xaxis_title="% of budget earned", yaxis_title=None)
+        fig = charts.wbs_bars(shown, "node", C, TPL)
         st.plotly_chart(fig, use_container_width=True)
 
     disp = tbl.copy()
@@ -269,45 +250,41 @@ with tabs[2]:
     if periods.empty:
         st.markdown(theme.note("No time-phased value available."), unsafe_allow_html=True)
     else:
-        p = periods.copy()
-        fig = go.Figure()
-        fig.add_bar(x=p["period"], y=p["pv"], name=f"{period_label} planned",
-                    marker_color=C["plan"], opacity=0.65)
-        fig.add_bar(x=p["period"], y=p["ev"], name=f"{period_label} earned",
-                    marker_color=C["accent"], opacity=0.9)
-        fig.add_trace(go.Scatter(x=p["period"], y=p["cum_pv"], name="Cumulative planned",
-                                 mode="lines", yaxis="y2",
-                                 line=dict(color=C["plan"], width=2, dash="dot")))
-        fig.add_trace(go.Scatter(x=p["period"], y=p["cum_ev"].where(p["cum_ev"] > 0),
-                                 name="Cumulative earned", mode="lines", yaxis="y2",
-                                 line=dict(color=C["accent"], width=3)))
-        fig.add_trace(go.Scatter(x=p["period"], y=p["cum_fcst"], name="Forecast",
-                                 mode="lines", yaxis="y2",
-                                 line=dict(color=C["muted"], width=2, dash="dash")))
-        if pd.notna(data_date):
-            fig.add_vline(x=data_date, line_width=1, line_dash="dot", line_color=C["text"],
-                          annotation_text="data date", annotation_position="top",
-                          annotation_font_size=10)
-        fig.update_layout(
-            template=TPL, height=470, barmode="group", bargap=0.25,
-            yaxis=dict(title=f"{period_label} value (SAR)"),
-            yaxis2=dict(title="Cumulative (SAR)", overlaying="y", side="right",
-                        gridcolor="rgba(0,0,0,0)"),
-            hovermode="x unified")
+        show_ac = st.toggle("Show actual cost", value=False,
+                            help="P6 derives actuals from percent complete on this project, "
+                                 "so the actual line sits on top of the earned line.")
+        fig = charts.scurve(periods, data_date, C, TPL, period_label, show_ac)
         st.plotly_chart(fig, use_container_width=True)
 
     k = st.columns(5)
     k[0].markdown(theme.kpi("Planned value", f"SAR {money(m['pv'])}"), unsafe_allow_html=True)
     k[1].markdown(theme.kpi("Earned value", f"SAR {money(m['ev'])}", accent=True), unsafe_allow_html=True)
-    k[2].markdown(theme.kpi("Estimate at completion", f"SAR {money(m['eac'])}"), unsafe_allow_html=True)
+    k[2].markdown(theme.kpi("Estimate at completion", f"SAR {money(m['eac'])}",
+                            f"technique {m['etc_technique']}"), unsafe_allow_html=True)
     k[3].markdown(theme.kpi("Variance at completion", f"SAR {money(m['vac'])}"), unsafe_allow_html=True)
     k[4].markdown(theme.kpi("TCPI", idx(m["tcpi"])), unsafe_allow_html=True)
 
+    with st.expander("Calculation method — read from this file, not assumed"):
+        tech = scope["ev_technique"].value_counts()
+        st.markdown(f"""
+| Figure | P6 formula | Setting in this file |
+|---|---|---|
+| Activity % Complete | per `complete_pct_type` | {', '.join(f'{k} x{v}' for k, v in scope['complete_pct_type'].value_counts().items())} |
+| Performance % / EV | BAC x Performance % | `ev_compute_type` = {', '.join(f'{k} x{v}' for k, v in tech.items())} |
+| Planned Value | BAC x Schedule % Complete | baseline dates on the activity calendar |
+| Schedule % Complete | elapsed baseline working hours / total | `{fallback.name}`, {fallback.days_per_week}-day week |
+| ETC | per `ev_etc_compute_type` | {m['etc_technique']} |
+| EAC | AC + ETC | SAR {money(m['eac'])} |
+| SPI / CPI | EV/PV, EV/AC | {idx(m['spi'])} / {idx(m['cpi'])} |
+""")
+        st.caption("Cumulative planned value at the data date reconciles exactly to the sum of "
+                   "BAC x Schedule % Complete across every activity.")
+
     st.markdown(theme.note(
-        "The earned curve before the data date is reconstructed by spreading each activity's "
-        "earned value across its actual dates. A single XER holds no progress history, so this "
-        "is an <b>assumption</b>, not a record. Load successive updates in Update Comparison for "
-        "a measured history."), unsafe_allow_html=True)
+        "The earned curve <b>before</b> the data date is reconstructed by spreading each activity's "
+        "earned value across its actual dates. A single XER holds no progress history, so that part "
+        "of the curve is an assumption. Every figure <b>at</b> the data date is calculated, not "
+        "assumed."), unsafe_allow_html=True)
 
 # --------------------------------------------------------------------------
 # 4. Slippage & variance
@@ -337,11 +314,7 @@ with tabs[3]:
 
     if not by_wbs.empty:
         b = by_wbs.iloc[::-1]
-        fig = go.Figure()
-        fig.add_bar(y=b["wbs_main"], x=b["worst_slip_d"], orientation="h", name="Worst slip",
-                    marker_color=[C["bad"] if v > 0 else C["good"] for v in b["worst_slip_d"].fillna(0)])
-        fig.update_layout(template=TPL, height=max(280, 34 * len(b)),
-                          xaxis_title="working days late (worst activity in group)", yaxis_title=None)
+        fig = charts.slip_bars(b, "wbs_main", "worst_slip_d", C, TPL)
         st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("#### Most consequential delays")
@@ -384,13 +357,7 @@ with tabs[4]:
         st.markdown(theme.note("No driving activities found. Check that the schedule has been "
                                "scheduled with the longest-path flag written."), unsafe_allow_html=True)
     else:
-        fig = go.Figure(go.Bar(
-            y=top["task_code"], x=top["impact_score"], orientation="h",
-            marker_color=C["accent"], text=top["task_name"].str.slice(0, 42),
-            textposition="inside", insidetextanchor="start",
-            textfont=dict(size=10, color=C["ground"] if mode == "dark" else "#FFFFFF")))
-        fig.update_layout(template=TPL, height=max(320, 30 * len(top)),
-                          xaxis_title="Impact score", yaxis_title=None)
+        fig = charts.driver_bars(top, C, TPL, dark=(mode == "dark"))
         st.plotly_chart(fig, use_container_width=True)
 
         st.dataframe(
