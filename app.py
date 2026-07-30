@@ -36,7 +36,7 @@ with st.sidebar:
     except Exception:
         pass
     st.markdown("### Project Controls Dashboard")
-    st.caption("XER Analytics · Ahmed Saad")
+    st.caption(f"XER Analytics · Ahmed Saad · build {theme.BUILD}")
     st.divider()
 
     mode = st.radio("Appearance", ["Dark", "Light"], horizontal=True, index=0).lower()
