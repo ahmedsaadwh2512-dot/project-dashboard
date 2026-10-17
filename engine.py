@@ -139,17 +139,21 @@ def rollup(a,key='wbs_main'):
 def curve(a,cals,dd,interval='Monthly'):
     """Working-hour weighted plan. EV is a snapshot, never fabricated history."""
     bucket={}
+    flows={}
     for r in a.itertuples():
         if pd.isna(r.bac) or r.bac<=0 or pd.isna(r.pv) or pd.isna(r.ev): continue
         cal=cals[r.base_calendar]; s,f=r.base_start,r.base_finish
         total=cal.hours_between(s,f)
         if total<=0:
-            bucket[f]=bucket.get(f,0)+r.bac;continue
+            bucket[f]=bucket.get(f,0)+r.bac
+            flows[f.normalize()]=flows.get(f.normalize(),0)+r.bac
+            continue
         day=s.normalize()
         while day<=f.normalize():
             end=min(day+pd.Timedelta(days=1),f)
             value=r.bac*cal.hours_between(max(day,s),end)/total
             bucket[end]=bucket.get(end,0)+value
+            flows[day]=flows.get(day,0)+value
             day+=pd.Timedelta(days=1)
     if not bucket:return pd.DataFrame(columns=['date','planned'])
     series=pd.Series(bucket).sort_index().cumsum()
@@ -158,7 +162,16 @@ def curve(a,cals,dd,interval='Monthly'):
     sampled=sampled[sampled.index<=series.index.max()]
     points=pd.concat([sampled,pd.Series({a.base_start.min():0.0,dd:totals(a)['pv'],series.index.max():series.iloc[-1]})]).sort_index()
     points=points[~points.index.duplicated(keep='last')]
-    return points.rename_axis('date').reset_index(name='planned')
+    result=points.rename_axis('date').reset_index(name='planned')
+    frequency={'Weekly':'W-THU','Monthly':'M','Quarterly':'Q'}[interval]
+    increments=pd.Series(flows).sort_index()
+    grouped=increments.groupby(increments.index.to_period(frequency)).sum()
+    complete_index=pd.period_range(grouped.index.min(),grouped.index.max(),freq=frequency)
+    grouped=grouped.reindex(complete_index,fill_value=0)
+    periods=pd.DataFrame({'date':grouped.index.to_timestamp(how='end'),'period_value':grouped.values,'cumulative':grouped.cumsum().values})
+    result.attrs['periods']=periods.to_dict('list')
+    result.attrs['interval']=interval
+    return result
 
 
 def quality(a,tables,dd):

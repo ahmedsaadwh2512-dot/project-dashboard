@@ -130,16 +130,17 @@ elif page=='WBS explorer':
     table(display.rename(columns={'bac':'BAC','pv':'PV','ev':'EV','planned':'Planned %','earned':'Earned %','variance_pp':'Variance (pp)'}),'wbs')
 
 elif page=='S-curve':
-    st.subheader('Baseline value profile')
+    st.subheader('Period plan & cumulative progress')
     c1,c2=st.columns(2)
-    interval=c1.radio('Interval',['Weekly','Monthly','Quarterly'],horizontal=True)
+    interval=c1.radio('Interval',['Weekly','Monthly','Quarterly'],index=1,horizontal=True)
     percent=c2.radio('Display',['Percent','Value (millions)'],horizontal=True)=='Percent'
     curve=plan_curve(a,(base or current)['calendars'],dd,interval)
     if not curve.empty:chart(charts.scurve(curve,dd,m,C,percent))
     cols=st.columns(4)
     for c,title,v in zip(cols,['BASELINE BUDGET','PLANNED VALUE','EARNED VALUE','SCHEDULE VARIANCE'],[m['bac'],m['pv'],m['ev'],m['ev']-m['pv']]):c.metric(title,fmt(v/1e6)+'M')
     st.info('Plan is weighted by working hours between reference activity start and finish, including calendar exceptions. Resource curves and assignment-specific spreads are not reproduced. EV is shown only at the data date; historical snapshots are required for an actual progress trend.')
-    if not curve.empty:table(curve,'planned_curve')
+    st.caption('Columns = period planned value (left axis). Line = cumulative plan (right axis). Percent labels use the measured baseline budget. Earned value is a data-date snapshot, not monthly history.')
+    if not curve.empty:table(pd.DataFrame(curve.attrs.get('periods',{})),'planned_curve')
 
 elif page=='Milestones & variance':
     st.subheader('Dates that need attention')
