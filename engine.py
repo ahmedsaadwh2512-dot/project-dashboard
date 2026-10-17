@@ -203,3 +203,24 @@ def export_csv(frame):
     for c in safe.select_dtypes(include=['object','string']).columns:
         safe[c]=safe[c].map(lambda x:"'"+x if isinstance(x,str) and x.startswith(('=','+','-','@')) else x)
     return safe.to_csv(index=False).encode('utf-8-sig')
+
+
+def schedule_attention(a, behind_basis='Either condition', critical_basis='Float ≤ 0', progress_tolerance=.1):
+    """Flag incomplete work only; missing progress/float never implies zero."""
+    out=a.copy()
+    incomplete=out.status.ne('Completed')
+    progress=out.earned_pct.notna() & out.planned_pct.notna() & ((out.planned_pct-out.earned_pct)*100 > progress_tolerance)
+    finish=out.variance_cd.gt(0)
+    if behind_basis=='Progress below plan':behind=progress
+    elif behind_basis=='Finish later than baseline':behind=finish
+    else:behind=progress|finish
+    floating=out.float_days.le(0)
+    longest=out.longest_path.fillna(False)
+    critical={'Float ≤ 0':floating,'Exported longest path':longest,'Either criterion':floating|longest}[critical_basis]
+    out['behind_schedule']=incomplete & behind.fillna(False)
+    out['critical']=incomplete & critical.fillna(False)
+    out['behind_and_critical']=out.behind_schedule & out.critical
+    out['progress_gap_pp']=(out.earned_pct-out.planned_pct)*100
+    out['behind_reason']=np.select([incomplete&progress&finish,incomplete&progress,incomplete&finish],['Progress below plan + finish later','Progress below plan','Finish later than baseline'],default='—')
+    out['critical_reason']=np.select([incomplete&floating&longest,incomplete&floating,incomplete&longest],['Float ≤ 0 + longest path','Float ≤ 0','Exported longest path'],default='—')
+    return out

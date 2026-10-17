@@ -11,7 +11,7 @@ with st.sidebar:
     st.markdown('### ◈ PROJECT CONTROLS')
     st.caption('XER INTELLIGENCE  /  '+theme.BUILD)
     dark=False
-    page=st.selectbox('Workspace',['Overview','WBS explorer','S-curve','Milestones & variance','Critical activities','Baseline comparison','Data quality','Activity register'])
+    page=st.selectbox('Workspace',['Overview','WBS explorer','S-curve','Milestones & variance','Critical activities','Activities behind schedule + Critical','Baseline comparison','Data quality','Activity register'])
     st.divider()
     current_file=st.file_uploader('01 · Current update',type=['xer'])
     baseline_file=st.file_uploader('02 · Approved baseline',type=['xer'])
@@ -165,6 +165,31 @@ elif page=='Critical activities':
     else:
         table(v[['task_code','task_name','wbs_main','start','finish','remaining_days','float_days']].sort_values(['float_days','finish']),'critical')
         chart(charts.timeline(v,C));st.caption('Timeline shows the first 60 activities by start. Float is read from the XER; the network is not rescheduled here.')
+
+elif page=='Activities behind schedule + Critical':
+    st.subheader('Activities behind schedule + Critical')
+    st.caption('Incomplete activities in the active scope. Completed work is excluded. Positive finish variance = late; negative progress gap = behind.')
+    c1,c2,c3=st.columns([1.4,1.2,1])
+    behind_basis=c1.selectbox('Behind-schedule definition',['Either condition','Progress below plan','Finish later than baseline'])
+    critical_basis=c2.selectbox('Critical definition',['Float ≤ 0','Exported longest path','Either criterion'])
+    tolerance=c3.number_input('Progress tolerance (pp)',min_value=0.0,max_value=100.0,value=.1,step=.1,help='A shortfall must exceed this tolerance. 0.1 pp means 0.1 percentage points.')
+    attention=en.schedule_attention(a,behind_basis,critical_basis,tolerance)
+    counts=[int(attention.behind_schedule.sum()),int(attention.critical.sum()),int(attention.behind_and_critical.sum())]
+    for col,label,value in zip(st.columns(3),['BEHIND SCHEDULE','CRITICAL','BEHIND + CRITICAL'],counts):col.metric(label,value)
+    st.caption('Progress: earned % below planned % by more than the tolerance. Finish: current finish later than the reference date. Missing progress or float is not treated as zero.')
+    names=['Behind schedule','Critical','Behind + Critical']
+    masks=[attention.behind_schedule,attention.critical,attention.behind_and_critical]
+    for tab,label,mask in zip(st.tabs(names),names,masks):
+        with tab:
+            selected=attention.loc[mask].sort_values(['float_days','progress_gap_pp','variance_cd'],ascending=[True,True,False],na_position='last').copy()
+            if selected.empty:
+                st.info('No activities meet this definition within the active filters.')
+                continue
+            for name in ['planned_pct','earned_pct']:selected[name]=(selected[name]*100).round(2)
+            cols=['task_code','task_name','wbs_path','status','planned_pct','earned_pct','progress_gap_pp','base_finish','finish','variance_cd','float_days','remaining_days','longest_path','behind_reason','critical_reason']
+            display=selected[cols].rename(columns={'task_code':'Activity ID','task_name':'Activity name','wbs_path':'WBS','status':'Status','planned_pct':'Planned %','earned_pct':'Earned %','progress_gap_pp':'Progress gap (pp)','base_finish':'Baseline finish','finish':'Current finish','variance_cd':'Finish variance (CD)','float_days':'Total float (WD)','remaining_days':'Remaining (WD)','longest_path':'Longest path','behind_reason':'Delay indicator','critical_reason':'Critical indicator'})
+            table(display,'attention_'+label.lower().replace(' + ','_and_').replace(' ','_'))
+    st.caption('Criticality is read from the exported float/path flags. These indicators do not prove the cause of delay or reschedule the project.')
 
 elif page=='Baseline comparison':
     st.subheader('Scope and date movement · full project')
