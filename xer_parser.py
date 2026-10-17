@@ -40,8 +40,8 @@ _P6_EPOCH = date(1899, 12, 30)
 
 def _coerce(df: pd.DataFrame) -> pd.DataFrame:
     for col in df.columns:
-        if col in FORCE_STR:
-            df[col] = df[col].astype("string")
+        if col in FORCE_STR or col.endswith("_id"):
+            df[col] = df[col].astype("string").fillna("")
             continue
         if col.endswith(DATE_SUFFIXES):
             df[col] = pd.to_datetime(df[col], errors="coerce")
@@ -54,10 +54,18 @@ def read_xer(path_or_buffer) -> dict[str, pd.DataFrame]:
     """Parse an XER file into {table_name: DataFrame}."""
     if hasattr(path_or_buffer, "read"):
         raw = path_or_buffer.read()
-        text = raw.decode("utf-8-sig", errors="replace") if isinstance(raw, bytes) else raw
     else:
-        with open(path_or_buffer, "r", encoding="utf-8-sig", errors="replace") as fh:
-            text = fh.read()
+        with open(path_or_buffer, "rb") as fh:
+            raw = fh.read()
+    if isinstance(raw, bytes):
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = raw.decode("cp1252")
+    else:
+        text = raw
+    if "%T\tTASK" not in text or "%T\tPROJECT" not in text:
+        raise ValueError("This file does not contain XER PROJECT and TASK tables.")
 
     tables: dict[str, pd.DataFrame] = {}
     current_name: str | None = None
@@ -103,11 +111,32 @@ class Calendar:
     day_hours: dict[int, float] = field(default_factory=dict)   # python weekday -> hours
     holidays: set[date] = field(default_factory=set)
     exception_hours: dict[date, float] = field(default_factory=dict)
+    shifts: dict[int, list] = field(default_factory=dict)
+    exception_shifts: dict[date, list] = field(default_factory=dict)
+    conversion_hours: float = 8.0
+
+    def intervals(self, day):
+        if day in self.exception_shifts:
+            return self.exception_shifts[day]
+        if day in self.holidays:
+            return []
+        return self.shifts.get(day.weekday(), [])
+
+    def hours_between(self, start, finish):
+        if pd.isna(start) or pd.isna(finish) or finish <= start:
+            return 0.0
+        start, finish = pd.Timestamp(start), pd.Timestamp(finish)
+        cur, total = start.normalize(), 0.0
+        while cur <= finish.normalize():
+            for a, b in self.intervals(cur.date()):
+                lo, hi = max(start, cur + pd.Timedelta(hours=a)), min(finish, cur + pd.Timedelta(hours=b))
+                total += max(0.0, (hi-lo).total_seconds()/3600)
+            cur += pd.Timedelta(days=1)
+        return total
 
     @property
     def hours_per_day(self) -> float:
-        working = [h for h in self.day_hours.values() if h > 0]
-        return sum(working) / len(working) if working else 8.0
+        return self.conversion_hours
 
     @property
     def days_per_week(self) -> int:
@@ -151,62 +180,43 @@ def _balanced(text: str, open_idx: int) -> tuple[str, int]:
     return "", len(text)
 
 
-_SHIFT_RE = re.compile(r"s\|(\d{1,2}):(\d{2})\|f\|(\d{1,2}):(\d{2})")
+def _shifts(block):
+    result = []
+    for body in re.findall(r"\(([^()]*)\)", block):
+        values = dict(re.findall(r"([sf])\|(\d{1,2}:\d{2})", body))
+        if "s" in values and "f" in values:
+            def hour(v):
+                h, m = map(int, v.split(":")); return h + m / 60
+            a, b = hour(values["s"]), hour(values["f"])
+            result.append((a, b if b >= a else b+24))
+    return result
 
 
-def _shift_hours(block: str) -> float:
-    total = 0.0
-    for sh, sm, fh, fm in _SHIFT_RE.findall(block):
-        start = int(sh) + int(sm) / 60
-        finish = int(fh) + int(fm) / 60
-        if finish < start:          # shift crosses midnight
-            finish += 24
-        total += finish - start
-    return total
-
-
-def parse_calendar_blob(clndr_id: str, name: str, blob: str, default_day_hrs: float = 8.0) -> Calendar:
-    """Decode the CALENDAR.clndr_data string into a Calendar."""
-    cal = Calendar(clndr_id=str(clndr_id), name=str(name))
-    if not isinstance(blob, str) or not blob:
-        cal.day_hours = {d: default_day_hrs for d in range(5)}   # Mon-Fri fallback
-        return cal
-
-    text = blob.replace("\r", "").replace("\n", "")
-
-    # --- DaysOfWeek -------------------------------------------------------
-    anchor = text.find("DaysOfWeek")
-    if anchor != -1:
-        open_idx = text.find("(", text.find("(", anchor) + 1)
-        section, _ = _balanced(text, open_idx) if open_idx != -1 else ("", 0)
-        for m in re.finditer(r"0\|\|(\d)\(\)", section):
-            p6_day = int(m.group(1))
-            grp_start = section.find("(", m.end())
-            body, _ = _balanced(section, grp_start) if grp_start != -1 else ("", 0)
-            hours = _shift_hours(body)
-            py_day = _P6_DAY_TO_PY.get(p6_day)
-            if py_day is not None:
-                cal.day_hours[py_day] = hours
-
-    if not any(h > 0 for h in cal.day_hours.values()):
-        cal.day_hours = {d: default_day_hrs for d in range(5)}
-
-    # --- Exceptions -------------------------------------------------------
-    anchor = text.find("Exceptions")
-    if anchor != -1:
-        open_idx = text.find("(", text.find("(", anchor) + 1)
-        section, _ = _balanced(text, open_idx) if open_idx != -1 else ("", 0)
-        for m in re.finditer(r"0\|\|\d+\(d\|(\d+)\)", section):
-            serial = int(m.group(1))
-            day = _P6_EPOCH + timedelta(days=serial)
-            grp_start = section.find("(", m.end())
-            body, _ = _balanced(section, grp_start) if grp_start != -1 else ("", 0)
-            hours = _shift_hours(body)
-            if hours > 0:
+def parse_calendar_blob(clndr_id, name, blob, default_day_hrs=8.0):
+    cal = Calendar(str(clndr_id), str(name), conversion_hours=default_day_hrs)
+    if not isinstance(blob, str) or "DaysOfWeek" not in blob:
+        raise ValueError(f"Calendar {name}: working week is missing; no silent fallback is used.")
+    for label, exception in [("DaysOfWeek", False), ("Exceptions", True)]:
+        anchor = blob.find(label)
+        if anchor < 0: continue
+        start = blob.find("(", blob.find("(", anchor)+1)
+        section, _ = _balanced(blob, start)
+        pattern = r"0\|\|\d+\(d\|(\d+)\)" if exception else r"0\|\|(\d)\(\)"
+        for m in re.finditer(pattern, section):
+            body, _ = _balanced(section, section.find("(", m.end()))
+            spans = _shifts(body)
+            hours = sum(b-a for a,b in spans)
+            if exception:
+                day = _P6_EPOCH + timedelta(days=int(m.group(1)))
+                cal.exception_shifts[day] = spans
                 cal.exception_hours[day] = hours
+                if not hours: cal.holidays.add(day)
             else:
-                cal.holidays.add(day)
-
+                day = _P6_DAY_TO_PY[int(m.group(1))]
+                cal.shifts[day] = spans
+                cal.day_hours[day] = hours
+    if len(cal.day_hours) != 7:
+        raise ValueError(f"Calendar {name}: incomplete working week.")
     return cal
 
 
