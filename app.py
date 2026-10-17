@@ -10,7 +10,7 @@ st.set_page_config(page_title='Project Controls | Ahmed Saad',page_icon='◈',la
 with st.sidebar:
     st.markdown('### ◈ PROJECT CONTROLS')
     st.caption('XER INTELLIGENCE  /  '+theme.BUILD)
-    dark=True
+    dark=False
     page=st.selectbox('Workspace',['Overview','WBS explorer','S-curve','Milestones & variance','Critical activities','Baseline comparison','Data quality','Activity register'])
     st.divider()
     current_file=st.file_uploader('01 · Current update',type=['xer'])
